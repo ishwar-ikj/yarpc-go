@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -100,6 +100,11 @@ type Call encoding.Call
 // context.
 //
 // The object is valid only as long as the request is ongoing.
+//
+// Testing
+//
+// To test functions which use CallFromContext, use yarpctest.ContextWithCall
+// to build contexts compatible with this function.
 func CallFromContext(ctx context.Context) *Call {
 	return (*Call)(encoding.CallFromContext(ctx))
 }

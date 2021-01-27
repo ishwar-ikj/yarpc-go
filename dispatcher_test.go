@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -32,7 +32,7 @@ import (
 	. "go.uber.org/yarpc"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/api/transport/transporttest"
-	"go.uber.org/yarpc/internal/introspection"
+	"go.uber.org/yarpc/api/x/introspection"
 	"go.uber.org/yarpc/internal/observability"
 	"go.uber.org/yarpc/transport/http"
 	"go.uber.org/yarpc/transport/tchannel"
@@ -59,7 +59,7 @@ func basicConfig(t testing.TB) Config {
 		Name: "test",
 		Inbounds: Inbounds{
 			tchannelTransport.NewInbound(),
-			httpTransport.NewInbound(":0"),
+			httpTransport.NewInbound("127.0.0.1:0"),
 		},
 	}
 }
@@ -823,16 +823,16 @@ func TestObservabilityConfig(t *testing.T) {
 
 func TestIntrospect(t *testing.T) {
 	httpTransport := http.NewTransport()
-	tchannelChannelTransport, err := tchannel.NewChannelTransport(tchannel.ServiceName("test"), tchannel.ListenAddr(":4040"))
+	tchannelChannelTransport, err := tchannel.NewChannelTransport(tchannel.ServiceName("test"), tchannel.ListenAddr("127.0.0.1:4040"))
 	require.NoError(t, err)
-	tchannelTransport, err := tchannel.NewTransport(tchannel.ServiceName("test"), tchannel.ListenAddr(":5050"))
+	tchannelTransport, err := tchannel.NewTransport(tchannel.ServiceName("test"), tchannel.ListenAddr("127.0.0.1:5050"))
 	require.NoError(t, err)
 	httpOutbound := httpTransport.NewSingleOutbound("http://127.0.0.1:1234")
 
 	config := Config{
 		Name: "test",
 		Inbounds: Inbounds{
-			httpTransport.NewInbound(":0"),
+			httpTransport.NewInbound("127.0.0.1:0"),
 			tchannelChannelTransport.NewInbound(),
 			tchannelTransport.NewInbound(),
 		},
@@ -853,34 +853,56 @@ func TestIntrospect(t *testing.T) {
 
 	dispatcherStatus := dispatcher.Introspect()
 
-	assert.Equal(t, config.Name, dispatcherStatus.Name)
-	assert.NotEmpty(t, dispatcherStatus.ID)
-	assert.Empty(t, dispatcherStatus.Procedures)
-	assert.Len(t, dispatcherStatus.Inbounds, 3)
-	assert.Len(t, dispatcherStatus.Outbounds, 4)
+	require.Equal(t, config.Name, dispatcherStatus.Name)
+	require.NotEmpty(t, dispatcherStatus.ID)
+	require.Empty(t, dispatcherStatus.Procedures)
+	require.Len(t, dispatcherStatus.Inbounds, 3)
+	require.Len(t, dispatcherStatus.Outbounds, 4)
 
 	inboundStatus := getInboundStatus(t, dispatcherStatus.Inbounds, "http", "")
 	assert.Equal(t, "Stopped", inboundStatus.State)
-	inboundStatus = getInboundStatus(t, dispatcherStatus.Inbounds, "tchannel", ":4040")
+	inboundStatus = getInboundStatus(t, dispatcherStatus.Inbounds, "tchannel", "127.0.0.1:4040")
 	assert.Equal(t, "ChannelClient", inboundStatus.State)
-	inboundStatus = getInboundStatus(t, dispatcherStatus.Inbounds, "tchannel", ":5050")
+	inboundStatus = getInboundStatus(t, dispatcherStatus.Inbounds, "tchannel", "127.0.0.1:5050")
 	assert.Equal(t, "", inboundStatus.State)
 
-	outboundStatus := getOutboundStatus(t, dispatcherStatus.Outbounds, "test-client-http", "unary")
-	assert.Equal(t, "http://127.0.0.1:1234", outboundStatus.Endpoint)
-	assert.Equal(t, "Stopped", outboundStatus.State)
-	assert.Equal(t, "test-client-http", outboundStatus.OutboundKey)
-	outboundStatus = getOutboundStatus(t, dispatcherStatus.Outbounds, "test-client-http", "oneway")
-	assert.Equal(t, "http://127.0.0.1:1234", outboundStatus.Endpoint)
-	assert.Equal(t, "Stopped", outboundStatus.State)
-	assert.Equal(t, "test-client-http", outboundStatus.OutboundKey)
-	outboundStatus = getOutboundStatus(t, dispatcherStatus.Outbounds, "test-client-tchannel-channel", "unary")
-	assert.Equal(t, "127.0.0.1:2345", outboundStatus.Endpoint)
-	assert.Equal(t, "Stopped", outboundStatus.State)
-	assert.Equal(t, "test-client-tchannel-channel", outboundStatus.OutboundKey)
-	outboundStatus = getOutboundStatus(t, dispatcherStatus.Outbounds, "test-client-tchannel", "unary")
-	assert.Equal(t, "Stopped", outboundStatus.State)
-	assert.Equal(t, "test-client-tchannel", outboundStatus.OutboundKey)
+	t.Run("outbound status", func(t *testing.T) {
+		tests := []struct {
+			outboundKey string
+			endpoint    string
+			rpcType     string
+		}{
+			{
+				outboundKey: "test-client-http",
+				endpoint:    "http://127.0.0.1:1234",
+				rpcType:     "oneway",
+			},
+			{
+				outboundKey: "test-client-http",
+				endpoint:    "http://127.0.0.1:1234",
+				rpcType:     "unary",
+			},
+			{
+				outboundKey: "test-client-tchannel",
+				endpoint:    "127.0.0.1:3456",
+				rpcType:     "unary",
+			},
+			{
+				outboundKey: "test-client-tchannel-channel",
+				endpoint:    "127.0.0.1:2345",
+				rpcType:     "unary",
+			},
+		}
+
+		for i, tt := range tests {
+			t.Run(tt.outboundKey, func(t *testing.T) {
+				status := dispatcherStatus.Outbounds[i]
+				assert.Equal(t, tt.outboundKey, status.OutboundKey)
+				assert.Equal(t, "Stopped", status.State)
+				assert.Equal(t, tt.rpcType, status.RPCType)
+			})
+		}
+	})
 
 	packageNameToVersion := make(map[string]string, len(dispatcherStatus.PackageVersions))
 	for _, packageVersion := range dispatcherStatus.PackageVersions {
@@ -901,16 +923,6 @@ func getInboundStatus(t *testing.T, inbounds []introspection.InboundStatus, tran
 	}
 	t.Fatalf("could not find inbound with transport %s and endpoint %s", transport, endpoint)
 	return introspection.InboundStatus{}
-}
-
-func getOutboundStatus(t *testing.T, outbounds []introspection.OutboundStatus, service string, rpcType string) introspection.OutboundStatus {
-	for _, outboundStatus := range outbounds {
-		if outboundStatus.Service == service && outboundStatus.RPCType == rpcType {
-			return outboundStatus
-		}
-	}
-	t.Fatalf("could not find outbound with service %s and rpcType %s", service, rpcType)
-	return introspection.OutboundStatus{}
 }
 
 func checkPackageVersion(t *testing.T, packageNameToVersion map[string]string, key string, expectedVersion string) {

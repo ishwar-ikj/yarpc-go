@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -62,6 +62,7 @@ var defaultTransportOptions = transportOptions{
 	connBackoffStrategy: backoff.DefaultExponential,
 	buildClient:         buildHTTPClient,
 	innocenceWindow:     defaultInnocenceWindow,
+	idleConnTimeout:     defaultIdleConnTimeout,
 	jitter:              rand.Int63n,
 }
 
@@ -109,6 +110,8 @@ func MaxIdleConnsPerHost(i int) TransportOption {
 // IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 // connection will remain idle before closing itself.
 // Zero means no limit.
+//
+// Defaults to 15 minutes.
 func IdleConnTimeout(t time.Duration) TransportOption {
 	return func(options *transportOptions) {
 		options.idleConnTimeout = t

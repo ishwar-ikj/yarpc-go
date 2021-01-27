@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/yarpc/api/transport"
+	"go.uber.org/yarpc/peer/hostport"
 	"go.uber.org/yarpc/transport/grpc"
 	"go.uber.org/yarpc/x/yarpctest/api"
 )
@@ -42,7 +43,9 @@ func GRPCStreamRequest(options ...api.ClientStreamRequestOption) api.Action {
 		}
 
 		trans := grpc.NewTransport()
-		out := trans.NewSingleOutbound(fmt.Sprintf("127.0.0.1:%d", opts.Port))
+		chooser, err := opts.NewChooser(hostport.PeerIdentifier(fmt.Sprintf("127.0.0.1:%d", opts.Port)), trans)
+		require.NoError(t, err, "failed to create chooser")
+		out := trans.NewOutbound(chooser)
 
 		require.NoError(t, trans.Start())
 		defer func() { assert.NoError(t, trans.Stop()) }()
@@ -50,7 +53,7 @@ func GRPCStreamRequest(options ...api.ClientStreamRequestOption) api.Action {
 		require.NoError(t, out.Start())
 		defer func() { assert.NoError(t, out.Stop()) }()
 
-		err := callStream(t, out, opts.GiveRequest, opts.StreamActions)
+		err = callStream(t, out, opts.GiveRequest, opts.StreamActions)
 		if len(opts.WantErrMsgs) > 0 {
 			require.Error(t, err)
 			for _, wantErrMsg := range opts.WantErrMsgs {
@@ -101,5 +104,18 @@ func WantStreamError(wantErrMsgs ...string) api.ClientStreamRequestOption {
 func CloseStream() api.ClientStreamAction {
 	return api.ClientStreamActionFunc(func(t testing.TB, c *transport.ClientStream) {
 		require.NoError(t, c.Close(context.Background()))
+	})
+}
+
+// WantHeaders is an action to fetch the client stream headers.
+func WantHeaders(want map[string]string) api.ClientStreamAction {
+	return api.ClientStreamActionFunc(func(t testing.TB, c *transport.ClientStream) {
+		got, err := c.Headers()
+		require.NoError(t, err)
+		for k, v := range want {
+			g, ok := got.Get(k)
+			require.True(t, ok)
+			assert.Equal(t, v, g)
+		}
 	})
 }

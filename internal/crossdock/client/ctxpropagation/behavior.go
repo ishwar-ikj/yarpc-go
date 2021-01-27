@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -346,7 +346,7 @@ func buildDispatcher(t crossdock.T) (dispatcher *yarpc.Dispatcher, tconfig serve
 	nextHop := nextHopTransport(t)
 
 	httpTransport := http.NewTransport()
-	tchannelTransport, err := tch.NewChannelTransport(tch.ListenAddr(":8087"), tch.ServiceName("ctxclient"))
+	tchannelTransport, err := tch.NewChannelTransport(tch.ListenAddr("127.0.0.1:8087"), tch.ServiceName("ctxclient"))
 	fatals.NoError(err, "Failed to build ChannelTransport")
 
 	// Outbound to use for this hop.
@@ -379,7 +379,7 @@ func buildDispatcher(t crossdock.T) (dispatcher *yarpc.Dispatcher, tconfig serve
 		Name: "ctxclient",
 		Inbounds: yarpc.Inbounds{
 			tchannelTransport.NewInbound(),
-			httpTransport.NewInbound(":8086"),
+			httpTransport.NewInbound("127.0.0.1:8086"),
 		},
 		Outbounds: yarpc.Outbounds{
 			"yarpc-test": {

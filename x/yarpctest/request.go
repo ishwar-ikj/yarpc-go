@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,7 +20,10 @@
 
 package yarpctest
 
-import "go.uber.org/yarpc/x/yarpctest/types"
+import (
+	"go.uber.org/yarpc/api/peer"
+	"go.uber.org/yarpc/x/yarpctest/types"
+)
 
 // Service specifies the "service" header for a request. It is a shared
 // option across different requests.
@@ -38,4 +41,9 @@ func Procedure(procedure string) *types.Procedure {
 // option across different requests.
 func ShardKey(key string) *types.ShardKey {
 	return &types.ShardKey{ShardKey: key}
+}
+
+// Chooser overrides the peer.Chooser for a request.
+func Chooser(f func(peer.Identifier, peer.Transport) (peer.Chooser, error)) *types.ChooserFactory {
+	return &types.ChooserFactory{NewChooser: f}
 }

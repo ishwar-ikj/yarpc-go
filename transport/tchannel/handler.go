@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,8 +21,10 @@
 package tchannel
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -80,6 +82,7 @@ type responseWriter interface {
 	ReleaseBuffer()
 	IsApplicationError() bool
 	SetApplicationError()
+	SetApplicationErrorMeta(meta *transport.ApplicationErrorMeta)
 	Write(s []byte) (int, error)
 }
 
@@ -123,11 +126,15 @@ func (h handler) handle(ctx context.Context, call inboundCall) {
 		call.Response().Blackhole()
 		return
 	}
+
+	clientTimedOut := ctx.Err() == context.DeadlineExceeded
+
 	if err != nil && !responseWriter.IsApplicationError() {
-		if err := call.Response().SendSystemError(getSystemError(err)); err != nil {
-			h.logger.Error("SendSystemError failed", zap.Error(err))
+		sendSysErr := call.Response().SendSystemError(getSystemError(err))
+		if sendSysErr != nil && !clientTimedOut {
+			// only log errors if client is still waiting for our response
+			h.logger.Error("SendSystemError failed", zap.Error(sendSysErr))
 		}
-		h.logger.Error("handler failed", zap.Error(err))
 		return
 	}
 	if err != nil && responseWriter.IsApplicationError() {
@@ -145,11 +152,11 @@ func (h handler) handle(ctx context.Context, call inboundCall) {
 			responseWriter.AddHeader(ErrorMessageHeaderKey, status.Message())
 		}
 	}
-	if err := responseWriter.Close(); err != nil {
-		if err := call.Response().SendSystemError(getSystemError(err)); err != nil {
-			h.logger.Error("SendSystemError failed", zap.Error(err))
+	if reswErr := responseWriter.Close(); reswErr != nil && !clientTimedOut {
+		if sendSysErr := call.Response().SendSystemError(getSystemError(reswErr)); sendSysErr != nil {
+			h.logger.Error("SendSystemError failed", zap.Error(sendSysErr))
 		}
-		h.logger.Error("responseWriter failed to close", zap.Error(err))
+		h.logger.Error("responseWriter failed to close", zap.Error(reswErr))
 	}
 }
 
@@ -164,7 +171,7 @@ func (h handler) callHandler(ctx context.Context, call inboundCall, responseWrit
 		Caller:          call.CallerName(),
 		Service:         call.ServiceName(),
 		Encoding:        transport.Encoding(call.Format()),
-		Transport:       transportName,
+		Transport:       TransportName,
 		Procedure:       call.MethodString(),
 		ShardKey:        call.ShardKey(),
 		RoutingKey:      call.RoutingKey(),
@@ -182,12 +189,23 @@ func (h handler) callHandler(ctx context.Context, call inboundCall, responseWrit
 		ctx = tchannel.ExtractInboundSpan(ctx, tcall.InboundCall, headers.Items(), tracer)
 	}
 
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
 	body, err := call.Arg3Reader()
 	if err != nil {
 		return err
 	}
-	defer body.Close()
-	treq.Body = body
+
+	if _, err = buf.ReadFrom(body); err != nil {
+		return err
+	}
+	if err = body.Close(); err != nil {
+		return err
+	}
+
+	treq.Body = bytes.NewReader(buf.Bytes())
+	treq.BodySize = buf.Len()
 
 	if err := transport.ValidateRequest(treq); err != nil {
 		return err
@@ -246,7 +264,6 @@ func newHandlerWriter(response inboundCallResponse, format tchannel.Format, head
 
 func (hw *handlerWriter) AddHeaders(h transport.Headers) {
 	for k, v := range h.OriginalItems() {
-		// TODO: is this considered a breaking change?
 		if isReservedHeaderKey(k) {
 			hw.failedWith = appendError(hw.failedWith, fmt.Errorf("cannot use reserved header key: %s", k))
 			return
@@ -261,6 +278,29 @@ func (hw *handlerWriter) AddHeader(key string, value string) {
 
 func (hw *handlerWriter) SetApplicationError() {
 	hw.applicationError = true
+}
+
+func (hw *handlerWriter) SetApplicationErrorMeta(applicationErrorMeta *transport.ApplicationErrorMeta) {
+	if applicationErrorMeta == nil {
+		return
+	}
+	if applicationErrorMeta.Code != nil {
+		hw.AddHeader(ApplicationErrorCodeHeaderKey, strconv.Itoa(int(*applicationErrorMeta.Code)))
+	}
+	if applicationErrorMeta.Name != "" {
+		hw.AddHeader(ApplicationErrorNameHeaderKey, applicationErrorMeta.Name)
+	}
+	if applicationErrorMeta.Details != "" {
+		hw.AddHeader(ApplicationErrorDetailsHeaderKey, truncateAppErrDetails(applicationErrorMeta.Details))
+	}
+}
+
+func truncateAppErrDetails(val string) string {
+	if len(val) <= _maxAppErrDetailsHeaderLen {
+		return val
+	}
+	stripIndex := _maxAppErrDetailsHeaderLen - len(_truncatedHeaderMessage)
+	return val[:stripIndex] + _truncatedHeaderMessage
 }
 
 func (hw *handlerWriter) IsApplicationError() bool {

@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,4 +20,8 @@
 
 package grpc
 
-const transportName = "grpc"
+// TransportName is the name of the transport.
+//
+// This value is what is used as transport.Request#Transport and transport.Namer
+// for Outbounds.
+const TransportName = "grpc"

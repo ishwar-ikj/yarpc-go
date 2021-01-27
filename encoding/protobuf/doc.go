@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -73,7 +73,7 @@
 //     rpc Echo(EchoRequest) returns (EchoResponse) {}
 //   }
 //
-// And the following configuation:
+// And the following configuration:
 //
 //   service:
 //     name: hello
@@ -103,32 +103,6 @@
 //   yab -p http://0.0.0.0:8080 -e json -s hello -p foo.bar.Baz::Echo -r '{"value":"sample"}'
 //
 // See https://github.com/yarpc/yab for more details.
-//
-// Oneway methods are supported as well. To use, define your RPC
-// method to return the uber.yarpc.Oneway type defined in
-// go.uber.org/yarpc/yarpcproto/yarpc.proto.
-//
-//   syntax = "proto3";
-//
-//   import "go.uber.org/yarpc/yarpcproto/yarpc.proto";
-//
-//   package foo;
-//
-//   message FireRequest {}
-//
-//   service Baz {
-//     rpc Fire(FireRequest) returns (uber.yarpc.Oneway) {}
-//   }
-//
-// Corresponding BazYARPCClient and BazYARPCServer interfaces will be generated.
-//
-//   type BazYARPCClient interface {
-//     Fire(context.Context, *FireRequest, ...yarpc.CallOption) (yarpc.Ack, error)
-//   }
-//
-//   type BazYARPCServer interface {
-//     Fire(context.Context, *FireRequest) error
-//   }
 //
 // Except for any ClientOptions (such as UseJSON), the types and functions
 // defined in this package should not be directly used in applications,

@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,10 +22,12 @@ package observability
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"go.uber.org/net/metrics"
 	"go.uber.org/yarpc/api/transport"
+	"go.uber.org/yarpc/yarpcerrors"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -34,24 +36,42 @@ var _writerPool = sync.Pool{New: func() interface{} {
 	return &writer{}
 }}
 
-// writer wraps a transport.ResponseWriter so the observing middleware can
-// detect application errors.
+// writer wraps a transport.ResponseWriter and a transport.ApplicationErrorMetaSetter so the observing middleware can
+// detect application errors and their metadata.
 type writer struct {
 	transport.ResponseWriter
 
-	isApplicationError bool
+	isApplicationError   bool
+	applicationErrorMeta *transport.ApplicationErrorMeta
+
+	responseSize int
 }
 
 func newWriter(rw transport.ResponseWriter) *writer {
 	w := _writerPool.Get().(*writer)
-	w.isApplicationError = false
-	w.ResponseWriter = rw
+	*w = writer{ResponseWriter: rw} // reset
 	return w
 }
 
 func (w *writer) SetApplicationError() {
 	w.isApplicationError = true
 	w.ResponseWriter.SetApplicationError()
+}
+
+func (w *writer) SetApplicationErrorMeta(applicationErrorMeta *transport.ApplicationErrorMeta) {
+	if applicationErrorMeta == nil {
+		return
+	}
+
+	w.applicationErrorMeta = applicationErrorMeta
+	if appErrMetaSetter, ok := w.ResponseWriter.(transport.ApplicationErrorMetaSetter); ok {
+		appErrMetaSetter.SetApplicationErrorMeta(applicationErrorMeta)
+	}
+}
+
+func (w *writer) Write(p []byte) (n int, err error) {
+	w.responseSize += len(p)
+	return w.ResponseWriter.Write(p)
 }
 
 func (w *writer) free() {
@@ -137,9 +157,25 @@ func applyLogLevelsConfig(dst *levels, src *DirectionalLevelsConfig) {
 // Handle implements middleware.UnaryInbound.
 func (m *Middleware) Handle(ctx context.Context, req *transport.Request, w transport.ResponseWriter, h transport.UnaryHandler) error {
 	call := m.graph.begin(ctx, transport.Unary, _directionInbound, req)
+	defer m.handlePanicForCall(call, transport.Unary)
+
 	wrappedWriter := newWriter(w)
 	err := h.Handle(ctx, req, wrappedWriter)
-	call.EndWithAppError(err, wrappedWriter.isApplicationError)
+	ctxErr := ctxErrOverride(ctx, req)
+
+	call.EndHandleWithAppError(
+		callResult{
+			err:                  err,
+			ctxOverrideErr:       ctxErr,
+			isApplicationError:   wrappedWriter.isApplicationError,
+			applicationErrorMeta: wrappedWriter.applicationErrorMeta,
+			requestSize:          req.BodySize,
+			responseSize:         wrappedWriter.responseSize,
+		})
+
+	if ctxErr != nil {
+		err = ctxErr
+	}
 	wrappedWriter.free()
 	return err
 }
@@ -150,10 +186,21 @@ func (m *Middleware) Call(ctx context.Context, req *transport.Request, out trans
 	res, err := out.Call(ctx, req)
 
 	isApplicationError := false
+	var applicationErrorMeta *transport.ApplicationErrorMeta
+	var responseSize int
 	if res != nil {
 		isApplicationError = res.ApplicationError
+		applicationErrorMeta = res.ApplicationErrorMeta
+		responseSize = res.BodySize
 	}
-	call.EndWithAppError(err, isApplicationError)
+	callRes := callResult{
+		err:                  err,
+		isApplicationError:   isApplicationError,
+		applicationErrorMeta: applicationErrorMeta,
+		requestSize:          req.BodySize,
+		responseSize:         responseSize,
+	}
+	call.EndCallWithAppError(callRes)
 	return res, err
 }
 
@@ -161,7 +208,7 @@ func (m *Middleware) Call(ctx context.Context, req *transport.Request, out trans
 func (m *Middleware) HandleOneway(ctx context.Context, req *transport.Request, h transport.OnewayHandler) error {
 	call := m.graph.begin(ctx, transport.Oneway, _directionInbound, req)
 	err := h.HandleOneway(ctx, req)
-	call.End(err)
+	call.End(callResult{err: err, requestSize: req.BodySize})
 	return err
 }
 
@@ -169,13 +216,15 @@ func (m *Middleware) HandleOneway(ctx context.Context, req *transport.Request, h
 func (m *Middleware) CallOneway(ctx context.Context, req *transport.Request, out transport.OnewayOutbound) (transport.Ack, error) {
 	call := m.graph.begin(ctx, transport.Oneway, _directionOutbound, req)
 	ack, err := out.CallOneway(ctx, req)
-	call.End(err)
+	call.End(callResult{err: err, requestSize: req.BodySize})
 	return ack, err
 }
 
 // HandleStream implements middleware.StreamInbound.
 func (m *Middleware) HandleStream(serverStream *transport.ServerStream, h transport.StreamHandler) error {
 	call := m.graph.begin(serverStream.Context(), transport.Streaming, _directionInbound, serverStream.Request().Meta.ToRequest())
+	defer m.handlePanicForCall(call, transport.Streaming)
+
 	call.EndStreamHandshake()
 	err := h.HandleStream(call.WrapServerStream(serverStream))
 	call.EndStream(err)
@@ -191,4 +240,41 @@ func (m *Middleware) CallStream(ctx context.Context, request *transport.StreamRe
 		return nil, err
 	}
 	return call.WrapClientStream(clientStream), nil
+}
+
+func ctxErrOverride(ctx context.Context, req *transport.Request) (ctxErr error) {
+	if ctx.Err() == context.DeadlineExceeded {
+		return yarpcerrors.DeadlineExceededErrorf(
+			"call to procedure %q of service %q from caller %q timed out",
+			req.Procedure, req.Service, req.Caller)
+	}
+
+	if ctx.Err() == context.Canceled {
+		return yarpcerrors.CancelledErrorf(
+			"call to procedure %q of service %q from caller %q was canceled",
+			req.Procedure, req.Service, req.Caller)
+	}
+
+	return nil
+}
+
+// handlePanicForCall checks for a panic without actually recovering from it
+// it must be called in defer otherwise recover will act as a no-op
+// The only action this method takes is to emit panic metrics
+func (m *Middleware) handlePanicForCall(call call, transportType transport.Type) {
+	// We only want to emit panic metrics without actually recovering from it
+	// Actual recovery from a panic happens at top of the stack in transport's Handler Invoker
+	// As this middleware is the one and only one with Metrics responsibility, we just panic again after
+	// checking for panic without actually recovering from it
+	if e := recover(); e != nil {
+		err := fmt.Errorf("panic: %v", e)
+
+		// Emit only the panic metrics
+		if transportType == transport.Streaming {
+			call.EndStreamWithPanic(err)
+		} else {
+			call.EndWithPanic(err)
+		}
+		panic(e)
+	}
 }

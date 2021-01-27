@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -73,7 +73,13 @@ func RecvStreamMsg(wantMsg string) *types.RecvStreamMsg {
 }
 
 // RecvStreamErr waits to receive a message on a client stream.  It expects
-// an error.
+// error messages.
 func RecvStreamErr(wantErrMsgs ...string) *types.RecvStreamMsg {
 	return &types.RecvStreamMsg{WantErrMsgs: wantErrMsgs}
+}
+
+// RecvStreamErrInstance waits to receive a message on a client stream.  It expects
+// an error.
+func RecvStreamErrInstance(wantErr error) *types.RecvStreamMsg {
+	return &types.RecvStreamMsg{WantErr: wantErr}
 }

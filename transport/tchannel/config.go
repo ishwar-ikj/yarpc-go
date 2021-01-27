@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -91,7 +91,7 @@ type transportSpec struct {
 
 func (ts *transportSpec) Spec() yarpcconfig.TransportSpec {
 	return yarpcconfig.TransportSpec{
-		Name:               transportName,
+		Name:               TransportName,
 		BuildTransport:     ts.buildTransport,
 		BuildInbound:       ts.buildInbound,
 		BuildUnaryOutbound: ts.buildUnaryOutbound,

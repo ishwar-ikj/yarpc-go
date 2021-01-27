@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -101,17 +102,19 @@ func (h handler) callHandler(responseWriter *responseWriter, req *http.Request, 
 	if req.Method != http.MethodPost {
 		return yarpcerrors.Newf(yarpcerrors.CodeNotFound, "request method was %s but only %s is allowed", req.Method, http.MethodPost)
 	}
+
 	treq := &transport.Request{
 		Caller:          popHeader(req.Header, CallerHeader),
 		Service:         service,
 		Procedure:       procedure,
 		Encoding:        transport.Encoding(popHeader(req.Header, EncodingHeader)),
-		Transport:       transportName,
+		Transport:       TransportName,
 		ShardKey:        popHeader(req.Header, ShardKeyHeader),
 		RoutingKey:      popHeader(req.Header, RoutingKeyHeader),
 		RoutingDelegate: popHeader(req.Header, RoutingDelegateHeader),
 		Headers:         applicationHeaders.FromHTTPHeaders(req.Header, transport.Headers{}),
 		Body:            req.Body,
+		BodySize:        int(req.ContentLength),
 	}
 	for header := range h.grabHeaders {
 		if value := req.Header.Get(header); value != "" {
@@ -239,6 +242,11 @@ func (h handler) createSpan(ctx context.Context, req *http.Request, treq *transp
 	return ctx, span
 }
 
+var (
+	_ transport.ResponseWriter             = (*responseWriter)(nil)
+	_ transport.ApplicationErrorMetaSetter = (*responseWriter)(nil)
+)
+
 // responseWriter adapts a http.ResponseWriter into a transport.ResponseWriter.
 type responseWriter struct {
 	w      http.ResponseWriter
@@ -263,6 +271,29 @@ func (rw *responseWriter) AddHeaders(h transport.Headers) {
 
 func (rw *responseWriter) SetApplicationError() {
 	rw.w.Header().Set(ApplicationStatusHeader, ApplicationErrorStatus)
+}
+
+func (rw *responseWriter) SetApplicationErrorMeta(meta *transport.ApplicationErrorMeta) {
+	if meta == nil {
+		return
+	}
+	if meta.Code != nil {
+		rw.w.Header().Set(_applicationErrorCodeHeader, strconv.Itoa(int(*meta.Code)))
+	}
+	if meta.Name != "" {
+		rw.w.Header().Set(_applicationErrorNameHeader, meta.Name)
+	}
+	if meta.Details != "" {
+		rw.w.Header().Set(_applicationErrorDetailsHeader, truncateAppErrDetails(meta.Details))
+	}
+}
+
+func truncateAppErrDetails(val string) string {
+	if len(val) <= _maxAppErrDetailsHeaderLen {
+		return val
+	}
+	stripIndex := _maxAppErrDetailsHeaderLen - len(_truncatedHeaderMessage)
+	return val[:stripIndex] + _truncatedHeaderMessage
 }
 
 func (rw *responseWriter) AddSystemHeader(key string, value string) {

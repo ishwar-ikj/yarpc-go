@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,10 +21,13 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +36,7 @@ import (
 	"go.uber.org/net/metrics"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/api/transport/transporttest"
+	"go.uber.org/yarpc/internal/bufferpool"
 	"go.uber.org/yarpc/internal/digester"
 	"go.uber.org/yarpc/yarpcerrors"
 	"go.uber.org/zap"
@@ -177,7 +181,11 @@ func TestMiddlewareLogging(t *testing.T) {
 		Body:            strings.NewReader("body"),
 	}
 
-	failed := errors.New("fail")
+	rawErr := errors.New("fail")
+	yErrNoDetails := yarpcerrors.Newf(yarpcerrors.CodeAborted, "fail")
+	yErrWithDetails := yarpcerrors.Newf(yarpcerrors.CodeAborted, "fail").WithDetails([]byte("err detail"))
+	yErrResourceExhausted := yarpcerrors.CodeResourceExhausted
+	appErrDetails := "an app error detail string, usually from thriftEx.Error()!"
 
 	baseFields := func() []zapcore.Field {
 		return []zapcore.Field{
@@ -192,31 +200,33 @@ func TestMiddlewareLogging(t *testing.T) {
 	}
 
 	type test struct {
-		desc            string
-		err             error // downstream error
-		applicationErr  bool  // downstream application error
-		wantErrLevel    zapcore.Level
-		wantInboundMsg  string
-		wantOutboundMsg string
-		wantFields      []zapcore.Field
+		desc                  string
+		err                   error             // downstream error
+		applicationErr        bool              // downstream application error
+		applicationErrName    string            // downstream application error name
+		applicationErrDetails string            // downstream application error message
+		applicationErrCode    *yarpcerrors.Code // downstream application error code
+		wantErrLevel          zapcore.Level
+		wantInboundMsg        string
+		wantOutboundMsg       string
+		wantFields            []zapcore.Field
 	}
 
 	tests := []test{
 		{
-			desc:            "no downstream errors",
+			desc:            "success",
 			wantErrLevel:    zapcore.InfoLevel,
 			wantInboundMsg:  "Handled inbound request.",
 			wantOutboundMsg: "Made outbound call.",
 			wantFields: []zapcore.Field{
 				zap.Duration("latency", 0),
 				zap.Bool("successful", true),
-				zap.Skip(),
-				zap.Skip(),
+				zap.Skip(), // ContextExtractor
 			},
 		},
 		{
 			desc:            "downstream transport error",
-			err:             failed,
+			err:             rawErr,
 			wantErrLevel:    zapcore.ErrorLevel,
 			wantInboundMsg:  "Error handling inbound request.",
 			wantOutboundMsg: "Error making outbound call.",
@@ -224,12 +234,101 @@ func TestMiddlewareLogging(t *testing.T) {
 				zap.Duration("latency", 0),
 				zap.Bool("successful", false),
 				zap.Skip(),
-				zap.Error(failed),
+				zap.Error(rawErr),
+				zap.String(_errorCodeLogKey, "unknown"),
 			},
 		},
 		{
-			desc:            "no downstream error but with application error",
-			applicationErr:  true,
+			desc:                  "thrift application error with no name",
+			applicationErr:        true,
+			applicationErrDetails: appErrDetails,
+			wantErrLevel:          zapcore.WarnLevel,
+			wantInboundMsg:        "Error handling inbound request.",
+			wantOutboundMsg:       "Error making outbound call.",
+			wantFields: []zapcore.Field{
+				zap.Duration("latency", 0),
+				zap.Bool("successful", false),
+				zap.Skip(),
+				zap.String("error", "application_error"),
+				zap.String("errorDetails", appErrDetails),
+			},
+		},
+		{
+			desc:                  "thrift application error with name and code",
+			applicationErr:        true,
+			applicationErrName:    "FunkyThriftError",
+			applicationErrDetails: appErrDetails,
+			applicationErrCode:    &yErrResourceExhausted,
+			wantErrLevel:          zapcore.WarnLevel,
+			wantInboundMsg:        "Error handling inbound request.",
+			wantOutboundMsg:       "Error making outbound call.",
+			wantFields: []zapcore.Field{
+				zap.Duration("latency", 0),
+				zap.Bool("successful", false),
+				zap.Skip(),
+				zap.String("error", "application_error"),
+				zap.String("errorCode", "resource-exhausted"),
+				zap.String("errorName", "FunkyThriftError"),
+				zap.String("errorDetails", appErrDetails),
+			},
+		},
+		{
+			// ie 'errors.New' return in Protobuf handler
+			desc:            "err and app error",
+			err:             rawErr,
+			applicationErr:  true, // always true for Protobuf handler errors
+			wantErrLevel:    zapcore.ErrorLevel,
+			wantInboundMsg:  "Error handling inbound request.",
+			wantOutboundMsg: "Error making outbound call.",
+			wantFields: []zapcore.Field{
+				zap.Duration("latency", 0),
+				zap.Bool("successful", false),
+				zap.Skip(),
+				zap.Error(rawErr),
+				zap.String(_errorCodeLogKey, "unknown"),
+			},
+		},
+		{
+			// ie 'yarpcerror' or 'protobuf.NewError` return in Protobuf handler
+			desc:            "yarpcerror, app error",
+			err:             yErrNoDetails,
+			applicationErr:  true, // always true for Protobuf handler errors
+			wantErrLevel:    zapcore.ErrorLevel,
+			wantInboundMsg:  "Error handling inbound request.",
+			wantOutboundMsg: "Error making outbound call.",
+			wantFields: []zapcore.Field{
+				zap.Duration("latency", 0),
+				zap.Bool("successful", false),
+				zap.Skip(),
+				zap.Error(yErrNoDetails),
+				zap.String(_errorCodeLogKey, "aborted"),
+			},
+		},
+		{
+			// ie 'protobuf.NewError' return in Protobuf handler
+			desc:                  "yarpcerror, app error with name and code",
+			err:                   yErrNoDetails,
+			applicationErr:        true, // always true for Protobuf handler errors
+			wantErrLevel:          zapcore.ErrorLevel,
+			applicationErrDetails: appErrDetails,
+			applicationErrName:    "MyErrMessageName",
+			wantInboundMsg:        "Error handling inbound request.",
+			wantOutboundMsg:       "Error making outbound call.",
+			wantFields: []zapcore.Field{
+				zap.Duration("latency", 0),
+				zap.Bool("successful", false),
+				zap.Skip(), // ContextExtractor
+				zap.Error(yErrNoDetails),
+				zap.String(_errorCodeLogKey, "aborted"),
+				zap.String(_errorNameLogKey, "MyErrMessageName"),
+				zap.String(_errorDetailsLogKey, appErrDetails),
+			},
+		},
+		{
+			// ie Protobuf error detail return in Protobuf handler
+			desc:            "err details, app error",
+			err:             yErrWithDetails,
+			applicationErr:  true, // always true for Protobuf handler errors
 			wantErrLevel:    zapcore.WarnLevel,
 			wantInboundMsg:  "Error handling inbound request.",
 			wantOutboundMsg: "Error making outbound call.",
@@ -237,17 +336,30 @@ func TestMiddlewareLogging(t *testing.T) {
 				zap.Duration("latency", 0),
 				zap.Bool("successful", false),
 				zap.Skip(),
-				zap.String("error", "application_error"),
+				zap.Error(yErrWithDetails),
+				zap.String(_errorCodeLogKey, "aborted"),
 			},
 		},
 	}
 
 	newHandler := func(t test) fakeHandler {
-		return fakeHandler{err: t.err, applicationErr: t.applicationErr}
+		return fakeHandler{
+			err:                   t.err,
+			applicationErr:        t.applicationErr,
+			applicationErrName:    t.applicationErrName,
+			applicationErrDetails: t.applicationErrDetails,
+			applicationErrCode:    t.applicationErrCode,
+		}
 	}
 
 	newOutbound := func(t test) fakeOutbound {
-		return fakeOutbound{err: t.err, applicationErr: t.applicationErr}
+		return fakeOutbound{
+			err:                   t.err,
+			applicationErr:        t.applicationErr,
+			applicationErrName:    t.applicationErrName,
+			applicationErrDetails: t.applicationErrDetails,
+			applicationErrCode:    t.applicationErrCode,
+		}
 	}
 
 	infoLevel := zapcore.InfoLevel
@@ -418,14 +530,14 @@ func TestMiddlewareStreamingLogging(t *testing.T) {
 		},
 	})
 
-	// helper function to retrive observered logs, asserting the expected number
+	// helper function to retrieve observed logs, asserting the expected number
 	getLogs := func(t *testing.T, num int) []observer.LoggedEntry {
 		logs := logs.TakeAll()
 		require.Equal(t, num, len(logs), "expected exactly %d logs, got %v: %#v", num, len(logs), logs)
 
 		var entries []observer.LoggedEntry
 		for _, e := range logs {
-			// zero the time for easiy comparisons
+			// zero the time for easy comparisons
 			e.Entry.Time = time.Time{}
 			entries = append(entries, e)
 		}
@@ -763,6 +875,107 @@ func TestMiddlewareStreamingLogging(t *testing.T) {
 		gotLogs := getLogs(t, 4)[1:]
 		assert.Equal(t, wantLogs, gotLogs)
 	})
+
+	t.Run("EOF is a success with an error", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		clientStream, serverStream, finish, err := transporttest.MessagePipe(ctx, req)
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			finish(mw.HandleStream(serverStream, &fakeHandler{
+				// send and receive messages in the handler
+				handleStream: func(stream *transport.ServerStream) {
+					// echo loop
+					for {
+						msg, err := stream.ReceiveMessage(ctx)
+						if err == io.EOF {
+							return
+						}
+						err = stream.SendMessage(ctx, msg)
+						if err == io.EOF {
+							return
+						}
+					}
+				},
+			}))
+			wg.Done()
+		}()
+
+		{
+			err := clientStream.SendMessage(ctx, nil)
+			require.NoError(t, err)
+		}
+
+		{
+			msg, err := clientStream.ReceiveMessage(ctx)
+			require.NoError(t, err)
+			assert.Nil(t, msg)
+		}
+
+		require.NoError(t, clientStream.Close(ctx))
+
+		wg.Wait()
+
+		logFields := func(err error) []zapcore.Field {
+			return newZapFields(
+				zap.String("direction", string(_directionInbound)),
+				zap.String("rpcType", "Streaming"),
+				zap.Bool("successful", true),
+				zap.Skip(), // context extractor
+				zap.Error(err),
+			)
+		}
+
+		wantLogs := []observer.LoggedEntry{
+			{
+				// open stream
+				Entry: zapcore.Entry{
+					Message: _successStreamOpen,
+				},
+				Context: logFields(nil),
+			},
+			{
+				// receive message
+				Entry: zapcore.Entry{
+					Message: _successfulStreamReceive,
+				},
+				Context: logFields(nil),
+			},
+			{
+				// send message
+				Entry: zapcore.Entry{
+					Message: _successfulStreamSend,
+				},
+				Context: logFields(nil),
+			},
+			{
+				// receive message (EOF)
+				Entry: zapcore.Entry{
+					Message: _successfulStreamReceive,
+				},
+				Context: logFields(io.EOF),
+			},
+			{
+				// close stream
+				Entry: zapcore.Entry{
+					Message: _successStreamClose,
+				},
+				Context: append(logFields(nil), zap.Duration("duration", 0)),
+			},
+		}
+
+		// log 1 - open stream
+		// log 2 - receive message
+		// log 3 - send message
+		// log 4 - receive message
+		// log 5 - close stream
+		gotLogs := getLogs(t, 5)
+		assert.Equal(t, wantLogs, gotLogs)
+	})
 }
 
 func TestMiddlewareMetrics(t *testing.T) {
@@ -776,14 +989,24 @@ func TestMiddlewareMetrics(t *testing.T) {
 		Body:      strings.NewReader("body"),
 	}
 
+	yErrAlreadyExists := yarpcerrors.CodeAlreadyExists
+	yErrCodeUnknown := yarpcerrors.CodeUnknown
+
+	type failureTags struct {
+		errorTag     string
+		errorNameTag string
+	}
+
 	type test struct {
 		desc               string
-		err                error // downstream error
-		applicationErr     bool  // downstream application error
+		err                error             // downstream error
+		applicationErr     bool              // downstream application error
+		applicationErrName string            // downstream application error name
+		applicationErrCode *yarpcerrors.Code // downstream application error code
 		wantCalls          int
 		wantSuccesses      int
-		wantCallerFailures map[string]int
-		wantServerFailures map[string]int
+		wantCallerFailures map[failureTags]int
+		wantServerFailures map[failureTags]int
 	}
 
 	tests := []test{
@@ -797,17 +1020,23 @@ func TestMiddlewareMetrics(t *testing.T) {
 			err:           yarpcerrors.Newf(yarpcerrors.CodeInvalidArgument, "test"),
 			wantCalls:     1,
 			wantSuccesses: 0,
-			wantCallerFailures: map[string]int{
-				yarpcerrors.CodeInvalidArgument.String(): 1,
+			wantCallerFailures: map[failureTags]int{
+				{
+					errorTag:     yarpcerrors.CodeInvalidArgument.String(),
+					errorNameTag: _notSet,
+				}: 1,
 			},
 		},
 		{
-			desc:          "invalid argument error",
+			desc:          "internal error",
 			err:           yarpcerrors.Newf(yarpcerrors.CodeInternal, "test"),
 			wantCalls:     1,
 			wantSuccesses: 0,
-			wantServerFailures: map[string]int{
-				yarpcerrors.CodeInternal.String(): 1,
+			wantServerFailures: map[failureTags]int{
+				{
+					errorTag:     yarpcerrors.CodeInternal.String(),
+					errorNameTag: _notSet,
+				}: 1,
 			},
 		},
 		{
@@ -815,8 +1044,11 @@ func TestMiddlewareMetrics(t *testing.T) {
 			err:           errors.New("test"),
 			wantCalls:     1,
 			wantSuccesses: 0,
-			wantServerFailures: map[string]int{
-				"unknown_internal_yarpc": 1,
+			wantServerFailures: map[failureTags]int{
+				{
+					errorTag:     "unknown_internal_yarpc",
+					errorNameTag: _notSet,
+				}: 1,
 			},
 		},
 		{
@@ -824,18 +1056,86 @@ func TestMiddlewareMetrics(t *testing.T) {
 			err:           yarpcerrors.Newf(yarpcerrors.Code(1000), "test"),
 			wantCalls:     1,
 			wantSuccesses: 0,
-			wantServerFailures: map[string]int{
-				"1000": 1,
+			wantServerFailures: map[failureTags]int{
+				{
+					errorTag:     "1000",
+					errorNameTag: _notSet,
+				}: 1,
+			},
+		},
+		{
+			desc:               "application error name with no code",
+			wantCalls:          1,
+			wantSuccesses:      0,
+			applicationErr:     true,
+			applicationErrName: "SomeError",
+			wantCallerFailures: map[failureTags]int{
+				{
+					errorTag:     "application_error",
+					errorNameTag: "SomeError",
+				}: 1,
+			},
+		},
+		{
+			desc:               "application error name with YARPC code - caller failure",
+			wantCalls:          1,
+			wantSuccesses:      0,
+			applicationErr:     true,
+			applicationErrName: "SomeError",
+			applicationErrCode: &yErrAlreadyExists,
+			wantCallerFailures: map[failureTags]int{
+				{
+					errorTag:     "already-exists",
+					errorNameTag: "SomeError",
+				}: 1,
+			},
+		},
+		{
+			desc:               "application error name with YARPC code - server failure",
+			wantCalls:          1,
+			wantSuccesses:      0,
+			applicationErr:     true,
+			applicationErrName: "InternalServerPain",
+			applicationErrCode: &yErrCodeUnknown,
+			wantServerFailures: map[failureTags]int{
+				{
+					errorTag:     "unknown",
+					errorNameTag: "InternalServerPain",
+				}: 1,
+			},
+		},
+		{
+			desc:               "application error with YARPC code and empty name",
+			wantCalls:          1,
+			wantSuccesses:      0,
+			applicationErr:     true,
+			applicationErrName: "",
+			applicationErrCode: &yErrAlreadyExists,
+			wantCallerFailures: map[failureTags]int{
+				{
+					errorTag:     "already-exists",
+					errorNameTag: _notSet,
+				}: 1,
 			},
 		},
 	}
 
 	newHandler := func(t test) fakeHandler {
-		return fakeHandler{err: t.err, applicationErr: t.applicationErr}
+		return fakeHandler{
+			err:                t.err,
+			applicationErr:     t.applicationErr,
+			applicationErrName: t.applicationErrName,
+			applicationErrCode: t.applicationErrCode,
+		}
 	}
 
 	newOutbound := func(t test) fakeOutbound {
-		return fakeOutbound{err: t.err, applicationErr: t.applicationErr}
+		return fakeOutbound{
+			err:                t.err,
+			applicationErr:     t.applicationErr,
+			applicationErrName: t.applicationErrName,
+			applicationErrCode: t.applicationErrCode,
+		}
 	}
 
 	for _, tt := range tests {
@@ -843,13 +1143,20 @@ func TestMiddlewareMetrics(t *testing.T) {
 			key, free := getKey(req, direction, rpcType)
 			edge := mw.graph.getEdge(key)
 			free()
-			assert.Equal(t, int64(tt.wantCalls), edge.calls.Load())
-			assert.Equal(t, int64(tt.wantSuccesses), edge.successes.Load())
-			for tagName, val := range tt.wantCallerFailures {
-				assert.Equal(t, int64(val), edge.callerFailures.MustGet(_error, tagName).Load())
+			assert.EqualValues(t, tt.wantCalls, edge.calls.Load(), "expected calls mismatch")
+			assert.EqualValues(t, tt.wantSuccesses, edge.successes.Load(), "expected successes mismatch")
+			assert.EqualValues(t, 0, edge.panics.Load(), "expected panics mismatch")
+			for failureTags, num := range tt.wantCallerFailures {
+				assert.EqualValues(t, num, edge.callerFailures.MustGet(
+					_error, failureTags.errorTag,
+					_errorNameMetricsKey, failureTags.errorNameTag,
+				).Load(), "expected caller failures mismatch")
 			}
-			for tagName, val := range tt.wantServerFailures {
-				assert.Equal(t, int64(val), edge.serverFailures.MustGet(_error, tagName).Load())
+			for failureTags, num := range tt.wantServerFailures {
+				assert.EqualValues(t, num, edge.serverFailures.MustGet(
+					_error, failureTags.errorTag,
+					_errorNameMetricsKey, failureTags.errorNameTag,
+				).Load(), "expected server failures mismatch")
 			}
 		}
 		t.Run(tt.desc+", unary inbound", func(t *testing.T) {
@@ -897,6 +1204,9 @@ func getKey(req *transport.Request, direction string, rpcType transport.Type) (k
 
 func TestUnaryInboundApplicationErrors(t *testing.T) {
 	defer stubTime()()
+
+	yErrAlreadyExists := yarpcerrors.CodeAlreadyExists
+
 	req := &transport.Request{
 		Caller:          "caller",
 		Service:         "service",
@@ -923,6 +1233,8 @@ func TestUnaryInboundApplicationErrors(t *testing.T) {
 		zap.Bool("successful", false),
 		zap.Skip(),
 		zap.String("error", "application_error"),
+		zap.String("errorCode", "already-exists"),
+		zap.String("errorName", "SomeFakeError"),
 	}
 
 	core, logs := observer.New(zap.DebugLevel)
@@ -936,7 +1248,12 @@ func TestUnaryInboundApplicationErrors(t *testing.T) {
 		context.Background(),
 		req,
 		&transporttest.FakeResponseWriter{},
-		fakeHandler{err: nil, applicationErr: true},
+		fakeHandler{
+			err:                nil,
+			applicationErr:     true,
+			applicationErrName: "SomeFakeError",
+			applicationErrCode: &yErrAlreadyExists,
+		},
 	), "Unexpected transport error.")
 
 	expected := observer.LoggedEntry{
@@ -954,7 +1271,9 @@ func TestUnaryInboundApplicationErrors(t *testing.T) {
 }
 
 func TestMiddlewareSuccessSnapshot(t *testing.T) {
-	defer stubTime()()
+	timeVal := time.Now()
+	defer stubTimeWithTimeVal(timeVal)()
+	ttlMs := int64(1000)
 	root := metrics.New()
 	meter := root.Scope()
 	mw := NewMiddleware(Config{
@@ -963,8 +1282,15 @@ func TestMiddlewareSuccessSnapshot(t *testing.T) {
 		ContextExtractor: NewNopContextExtractor(),
 	})
 
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
+	buf.Write([]byte("body"))
+
+	ctx, cancel := context.WithDeadline(context.Background(), timeVal.Add(time.Millisecond*time.Duration(ttlMs)))
+	defer cancel()
 	err := mw.Handle(
-		context.Background(),
+		ctx,
 		&transport.Request{
 			Caller:          "caller",
 			Service:         "service",
@@ -974,10 +1300,11 @@ func TestMiddlewareSuccessSnapshot(t *testing.T) {
 			ShardKey:        "sk",
 			RoutingKey:      "rk",
 			RoutingDelegate: "rd",
-			Body:            strings.NewReader("body"),
+			Body:            buf,
+			BodySize:        buf.Len(),
 		},
 		&transporttest.FakeResponseWriter{},
-		fakeHandler{err: nil, applicationErr: false},
+		fakeHandler{responseData: []byte("test response")},
 	)
 	assert.NoError(t, err, "Unexpected transport error.")
 
@@ -996,11 +1323,223 @@ func TestMiddlewareSuccessSnapshot(t *testing.T) {
 	want := &metrics.RootSnapshot{
 		Counters: []metrics.Snapshot{
 			{Name: "calls", Tags: tags, Value: 1},
+			{Name: "panics", Tags: tags, Value: 0},
 			{Name: "successes", Tags: tags, Value: 1},
 		},
 		Histograms: []metrics.HistogramSnapshot{
 			{
 				Name: "caller_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "request_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{4},
+			},
+			{
+				Name:   "response_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{16},
+			},
+			{
+				Name: "server_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "success_latency_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{1},
+			},
+			{
+				Name: "timeout_ttl_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "ttl_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{ttlMs},
+			},
+		},
+	}
+	assert.Equal(t, want, snap, "Unexpected snapshot of metrics.")
+}
+
+func TestMiddlewareSuccessSnapshotForCall(t *testing.T) {
+	timeVal := time.Now()
+	defer stubTimeWithTimeVal(timeVal)()
+	ttlMs := int64(1000)
+	root := metrics.New()
+	meter := root.Scope()
+	mw := NewMiddleware(Config{
+		Logger:           zap.NewNop(),
+		Scope:            meter,
+		ContextExtractor: NewNopContextExtractor(),
+	})
+
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
+	buf.Write([]byte("body"))
+
+	ctx, cancel := context.WithDeadline(context.Background(), timeVal.Add(time.Millisecond*time.Duration(ttlMs)))
+	defer cancel()
+	_, err := mw.Call(
+		ctx,
+		&transport.Request{
+			Caller:          "caller",
+			Service:         "service",
+			Transport:       "",
+			Encoding:        "raw",
+			Procedure:       "procedure",
+			ShardKey:        "sk",
+			RoutingKey:      "rk",
+			RoutingDelegate: "rd",
+			Body:            buf,
+			BodySize:        buf.Len(),
+		},
+		&fakeOutbound{body: []byte("body")},
+	)
+	assert.NoError(t, err, "Unexpected transport error.")
+
+	snap := root.Snapshot()
+	tags := metrics.Tags{
+		"dest":             "service",
+		"direction":        "outbound",
+		"transport":        "unknown",
+		"encoding":         "raw",
+		"procedure":        "procedure",
+		"routing_delegate": "rd",
+		"routing_key":      "rk",
+		"rpc_type":         transport.Unary.String(),
+		"source":           "caller",
+	}
+	want := &metrics.RootSnapshot{
+		Counters: []metrics.Snapshot{
+			{Name: "calls", Tags: tags, Value: 1},
+			{Name: "panics", Tags: tags, Value: 0},
+			{Name: "successes", Tags: tags, Value: 1},
+		},
+		Histograms: []metrics.HistogramSnapshot{
+			{
+				Name: "caller_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "request_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{4},
+			},
+			{
+				Name:   "response_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{4},
+			},
+			{
+				Name: "server_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "success_latency_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{1},
+			},
+			{
+				Name: "timeout_ttl_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "ttl_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{ttlMs},
+			},
+		},
+	}
+	assert.Equal(t, want, snap, "Unexpected snapshot of metrics.")
+}
+
+func TestMiddlewareSuccessSnapshotForCallOnWay(t *testing.T) {
+	timeVal := time.Now()
+	defer stubTimeWithTimeVal(timeVal)()
+	ttlMs := int64(1000)
+	root := metrics.New()
+	meter := root.Scope()
+	mw := NewMiddleware(Config{
+		Logger:           zap.NewNop(),
+		Scope:            meter,
+		ContextExtractor: NewNopContextExtractor(),
+	})
+
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
+	buf.Write([]byte("body"))
+
+	ctx, cancel := context.WithDeadline(context.Background(), timeVal.Add(time.Millisecond*time.Duration(ttlMs)))
+	defer cancel()
+	_, err := mw.CallOneway(
+		ctx,
+		&transport.Request{
+			Caller:          "caller",
+			Service:         "service",
+			Transport:       "",
+			Encoding:        "raw",
+			Procedure:       "procedure",
+			ShardKey:        "sk",
+			RoutingKey:      "rk",
+			RoutingDelegate: "rd",
+			Body:            buf,
+			BodySize:        buf.Len(),
+		},
+		&fakeOutbound{body: []byte("body")},
+	)
+	assert.NoError(t, err, "Unexpected transport error.")
+
+	snap := root.Snapshot()
+	tags := metrics.Tags{
+		"dest":             "service",
+		"direction":        "outbound",
+		"transport":        "unknown",
+		"encoding":         "raw",
+		"procedure":        "procedure",
+		"routing_delegate": "rd",
+		"routing_key":      "rk",
+		"rpc_type":         transport.Oneway.String(),
+		"source":           "caller",
+	}
+	want := &metrics.RootSnapshot{
+		Counters: []metrics.Snapshot{
+			{Name: "calls", Tags: tags, Value: 1},
+			{Name: "panics", Tags: tags, Value: 0},
+			{Name: "successes", Tags: tags, Value: 1},
+		},
+		Histograms: []metrics.HistogramSnapshot{
+			{
+				Name: "caller_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "request_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{4},
+			},
+			{
+				Name: "response_payload_size_bytes",
 				Tags: tags,
 				Unit: time.Millisecond,
 			},
@@ -1014,6 +1553,116 @@ func TestMiddlewareSuccessSnapshot(t *testing.T) {
 				Tags:   tags,
 				Unit:   time.Millisecond,
 				Values: []int64{1},
+			},
+			{
+				Name: "timeout_ttl_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "ttl_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{ttlMs},
+			},
+		},
+	}
+	assert.Equal(t, want, snap, "Unexpected snapshot of metrics.")
+}
+
+func TestMiddlewareSuccessSnapshotForOneWay(t *testing.T) {
+	timeVal := time.Now()
+	defer stubTimeWithTimeVal(timeVal)()
+	ttlMs := int64(1000)
+	root := metrics.New()
+	meter := root.Scope()
+	mw := NewMiddleware(Config{
+		Logger:           zap.NewNop(),
+		Scope:            meter,
+		ContextExtractor: NewNopContextExtractor(),
+	})
+
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
+	buf.Write([]byte("body"))
+
+	ctx, cancel := context.WithDeadline(context.Background(), timeVal.Add(time.Millisecond*time.Duration(ttlMs)))
+	defer cancel()
+	err := mw.HandleOneway(
+		ctx,
+		&transport.Request{
+			Caller:          "caller",
+			Service:         "service",
+			Transport:       "",
+			Encoding:        "raw",
+			Procedure:       "procedure",
+			ShardKey:        "sk",
+			RoutingKey:      "rk",
+			RoutingDelegate: "rd",
+			Body:            buf,
+			BodySize:        buf.Len(),
+		},
+		fakeHandler{responseData: []byte("test response")},
+	)
+	assert.NoError(t, err, "Unexpected transport error.")
+
+	snap := root.Snapshot()
+	tags := metrics.Tags{
+		"dest":             "service",
+		"direction":        "inbound",
+		"transport":        "unknown",
+		"encoding":         "raw",
+		"procedure":        "procedure",
+		"routing_delegate": "rd",
+		"routing_key":      "rk",
+		"rpc_type":         transport.Oneway.String(),
+		"source":           "caller",
+	}
+	want := &metrics.RootSnapshot{
+		Counters: []metrics.Snapshot{
+			{Name: "calls", Tags: tags, Value: 1},
+			{Name: "panics", Tags: tags, Value: 0},
+			{Name: "successes", Tags: tags, Value: 1},
+		},
+		Histograms: []metrics.HistogramSnapshot{
+			{
+				Name: "caller_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "request_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{4},
+			},
+			{
+				Name: "response_payload_size_bytes",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name: "server_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "success_latency_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{1},
+			},
+			{
+				Name: "timeout_ttl_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "ttl_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{ttlMs},
 			},
 		},
 	}
@@ -1030,6 +1679,11 @@ func TestMiddlewareFailureSnapshot(t *testing.T) {
 		ContextExtractor: NewNopContextExtractor(),
 	})
 
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
+	buf.Write([]byte("test body"))
+
 	err := mw.Handle(
 		context.Background(),
 		&transport.Request{
@@ -1041,10 +1695,11 @@ func TestMiddlewareFailureSnapshot(t *testing.T) {
 			ShardKey:        "sk",
 			RoutingKey:      "rk",
 			RoutingDelegate: "rd",
-			Body:            strings.NewReader("body"),
+			Body:            buf,
+			BodySize:        buf.Len(),
 		},
 		&transporttest.FakeResponseWriter{},
-		fakeHandler{err: fmt.Errorf("yuno"), applicationErr: false},
+		fakeHandler{err: fmt.Errorf("yuno"), applicationErr: false, responseData: []byte("error")},
 	)
 	assert.Error(t, err, "Expected transport error.")
 
@@ -1065,6 +1720,7 @@ func TestMiddlewareFailureSnapshot(t *testing.T) {
 		"direction":        "inbound",
 		"encoding":         "raw",
 		"error":            "unknown_internal_yarpc",
+		"error_name":       _notSet,
 		"procedure":        "procedure",
 		"routing_delegate": "rd",
 		"routing_key":      "rk",
@@ -1075,12 +1731,24 @@ func TestMiddlewareFailureSnapshot(t *testing.T) {
 	want := &metrics.RootSnapshot{
 		Counters: []metrics.Snapshot{
 			{Name: "calls", Tags: tags, Value: 1},
+			{Name: "panics", Tags: tags, Value: 0},
 			{Name: "server_failures", Tags: errorTags, Value: 1},
 			{Name: "successes", Tags: tags, Value: 0},
 		},
 		Histograms: []metrics.HistogramSnapshot{
 			{
 				Name: "caller_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "request_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{16},
+			},
+			{
+				Name: "response_payload_size_bytes",
 				Tags: tags,
 				Unit: time.Millisecond,
 			},
@@ -1095,50 +1763,189 @@ func TestMiddlewareFailureSnapshot(t *testing.T) {
 				Tags: tags,
 				Unit: time.Millisecond,
 			},
+			{
+				Name: "timeout_ttl_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name: "ttl_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+		},
+	}
+	assert.Equal(t, want, snap, "Unexpected snapshot of metrics.")
+}
+
+func TestMiddlewareFailureWithDeadlineExceededSnapshot(t *testing.T) {
+	timeVal := time.Now()
+	defer stubTimeWithTimeVal(timeVal)()
+
+	ttlMs := int64(1000)
+	root := metrics.New()
+	meter := root.Scope()
+	mw := NewMiddleware(Config{
+		Logger:           zap.NewNop(),
+		Scope:            meter,
+		ContextExtractor: NewNopContextExtractor(),
+	})
+
+	buf := bufferpool.Get()
+	defer bufferpool.Put(buf)
+
+	buf.Write([]byte("test body"))
+
+	ctx, cancel := context.WithDeadline(context.Background(), timeVal.Add(time.Millisecond*time.Duration(ttlMs)))
+	defer cancel()
+	err := mw.Handle(
+		ctx,
+		&transport.Request{
+			Caller:          "caller",
+			Service:         "service",
+			Transport:       "",
+			Encoding:        "raw",
+			Procedure:       "procedure",
+			ShardKey:        "sk",
+			RoutingKey:      "rk",
+			RoutingDelegate: "rd",
+			Body:            buf,
+			BodySize:        buf.Len(),
+		},
+		&transporttest.FakeResponseWriter{},
+		fakeHandler{
+			err:            yarpcerrors.DeadlineExceededErrorf("test deadline"),
+			applicationErr: false,
+			responseData:   []byte("deadline response"),
+		},
+	)
+	assert.Error(t, err, "Expected transport error.")
+
+	snap := root.Snapshot()
+	tags := metrics.Tags{
+		"dest":             "service",
+		"direction":        "inbound",
+		"encoding":         "raw",
+		"procedure":        "procedure",
+		"routing_delegate": "rd",
+		"routing_key":      "rk",
+		"rpc_type":         transport.Unary.String(),
+		"source":           "caller",
+		"transport":        "unknown",
+	}
+	errorTags := metrics.Tags{
+		"dest":             "service",
+		"direction":        "inbound",
+		"encoding":         "raw",
+		"error":            "deadline-exceeded",
+		"error_name":       _notSet,
+		"procedure":        "procedure",
+		"routing_delegate": "rd",
+		"routing_key":      "rk",
+		"rpc_type":         transport.Unary.String(),
+		"source":           "caller",
+		"transport":        "unknown",
+	}
+	want := &metrics.RootSnapshot{
+		Counters: []metrics.Snapshot{
+			{Name: "calls", Tags: tags, Value: 1},
+			{Name: "panics", Tags: tags, Value: 0},
+			{Name: "server_failures", Tags: errorTags, Value: 1},
+			{Name: "successes", Tags: tags, Value: 0},
+		},
+		Histograms: []metrics.HistogramSnapshot{
+			{
+				Name: "caller_failure_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "request_payload_size_bytes",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{16},
+			},
+			{
+				Name: "response_payload_size_bytes",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "server_failure_latency_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{1},
+			},
+			{
+				Name: "success_latency_ms",
+				Tags: tags,
+				Unit: time.Millisecond,
+			},
+			{
+				Name:   "timeout_ttl_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{ttlMs},
+			},
+			{
+				Name:   "ttl_ms",
+				Tags:   tags,
+				Unit:   time.Millisecond,
+				Values: []int64{ttlMs},
+			},
 		},
 	}
 	assert.Equal(t, want, snap, "Unexpected snapshot of metrics.")
 }
 
 func TestApplicationErrorSnapShot(t *testing.T) {
-	defer stubTime()()
-
 	tests := []struct {
-		name   string
-		err    error
-		errTag string
-		appErr bool
+		name       string
+		err        error
+		errTag     string
+		errNameTag string
+		appErr     bool
+		appErrName string
 	}{
 		{
-			name:   "status", // eg error returned in transport middleware
-			err:    yarpcerrors.Newf(yarpcerrors.CodeAlreadyExists, "foo exists!"),
-			errTag: "already-exists",
+			name:       "status", // eg error returned in transport middleware
+			err:        yarpcerrors.Newf(yarpcerrors.CodeAlreadyExists, "foo exists!"),
+			errTag:     "already-exists",
+			errNameTag: _notSet,
 		},
 		{
-			name:   "status and app error", // eg Protobuf handler returning yarpcerrors.Status
-			err:    yarpcerrors.Newf(yarpcerrors.CodeAlreadyExists, "foo exists!"),
-			errTag: "already-exists",
-			appErr: true,
+			name:       "status and app error", // eg Protobuf handler returning yarpcerrors.Status
+			err:        yarpcerrors.Newf(yarpcerrors.CodeAlreadyExists, "foo exists!"),
+			errTag:     "already-exists",
+			errNameTag: _notSet,
+			appErr:     true,
 		},
 		{
-			name:   "no status and app error", // eg Thrift exception
-			err:    errors.New("foo-bar-baz"),
-			errTag: "application_error",
-			appErr: true,
+			name:       "no status and app error", // eg Thrift exception
+			err:        errors.New("foo-bar-baz"),
+			errTag:     "application_error",
+			errNameTag: "FakeError1",
+			appErr:     true,
+			appErrName: "FakeError1",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			timeVal := time.Now()
+			defer stubTimeWithTimeVal(timeVal)()
+
+			ttlMs := int64(1000)
 			root := metrics.New()
 			meter := root.Scope()
 			mw := NewMiddleware(Config{
 				Logger: zap.NewNop(),
 				Scope:  meter,
 			})
-
+			ctx, cancel := context.WithDeadline(context.Background(), timeVal.Add(time.Millisecond*time.Duration(ttlMs)))
+			defer cancel()
 			err := mw.Handle(
-				context.Background(),
+				ctx,
 				&transport.Request{
 					Caller:          "caller",
 					Service:         "service",
@@ -1151,8 +1958,9 @@ func TestApplicationErrorSnapShot(t *testing.T) {
 				},
 				&transporttest.FakeResponseWriter{},
 				fakeHandler{
-					err:            tt.err,
-					applicationErr: tt.appErr,
+					err:                tt.err,
+					applicationErr:     tt.appErr,
+					applicationErrName: tt.appErrName,
 				},
 			)
 			require.Error(t, err)
@@ -1180,11 +1988,13 @@ func TestApplicationErrorSnapShot(t *testing.T) {
 				"rpc_type":         transport.Unary.String(),
 				"source":           "caller",
 				"error":            tt.errTag,
+				"error_name":       tt.errNameTag,
 			}
 			want := &metrics.RootSnapshot{
 				Counters: []metrics.Snapshot{
 					{Name: "caller_failures", Tags: errorTags, Value: 1},
 					{Name: "calls", Tags: tags, Value: 1},
+					{Name: "panics", Tags: tags, Value: 0},
 					{Name: "successes", Tags: tags, Value: 0},
 				},
 				Histograms: []metrics.HistogramSnapshot{
@@ -1193,6 +2003,17 @@ func TestApplicationErrorSnapShot(t *testing.T) {
 						Tags:   tags,
 						Unit:   time.Millisecond,
 						Values: []int64{1},
+					},
+					{
+						Name:   "request_payload_size_bytes",
+						Tags:   tags,
+						Unit:   time.Millisecond,
+						Values: []int64{0},
+					},
+					{
+						Name: "response_payload_size_bytes",
+						Tags: tags,
+						Unit: time.Millisecond,
 					},
 					{
 						Name: "server_failure_latency_ms",
@@ -1204,11 +2025,193 @@ func TestApplicationErrorSnapShot(t *testing.T) {
 						Tags: tags,
 						Unit: time.Millisecond,
 					},
+					{
+						Name: "timeout_ttl_ms",
+						Tags: tags,
+						Unit: time.Millisecond,
+					},
+					{
+						Name:   "ttl_ms",
+						Tags:   tags,
+						Unit:   time.Millisecond,
+						Values: []int64{ttlMs},
+					},
 				},
 			}
 			assert.Equal(t, want, snap, "Unexpected snapshot of metrics.")
 		})
 	}
+}
+
+func TestUnaryInboundApplicationPanics(t *testing.T) {
+	var err error
+	root := metrics.New()
+	scope := root.Scope()
+	mw := NewMiddleware(Config{
+		Logger:           zap.NewNop(),
+		Scope:            scope,
+		ContextExtractor: NewNopContextExtractor(),
+	})
+	newTags := func(direction directionName, withErr string) metrics.Tags {
+		tags := metrics.Tags{
+			"dest":             "service",
+			"direction":        string(direction),
+			"encoding":         "raw",
+			"procedure":        "procedure",
+			"routing_delegate": "rd",
+			"routing_key":      "rk",
+			"rpc_type":         transport.Unary.String(),
+			"source":           "caller",
+			"transport":        "unknown",
+		}
+		if withErr != "" {
+			tags["error"] = withErr
+		}
+		return tags
+	}
+	tags := newTags(_directionInbound, "")
+	errTags := newTags(_directionInbound, "application_error")
+
+	t.Run("Test panic in Handle", func(t *testing.T) {
+		t.Skip() // This test flaps. https://github.com/yarpc/yarpc-go/issues/1882
+		// Relevant bucket marked XXX below.
+
+		// As our fake handler is mocked to panic in the call, test that the invocation panics
+		assert.Panics(t, func() {
+			err = mw.Handle(
+				context.Background(),
+				&transport.Request{
+					Caller:          "caller",
+					Service:         "service",
+					Transport:       "",
+					Encoding:        "raw",
+					Procedure:       "procedure",
+					ShardKey:        "sk",
+					RoutingKey:      "rk",
+					RoutingDelegate: "rd",
+				},
+				&transporttest.FakeResponseWriter{},
+				fakeHandler{applicationPanic: true},
+			)
+		})
+		require.NoError(t, err)
+
+		want := &metrics.RootSnapshot{
+			Counters: []metrics.Snapshot{
+				{Name: "caller_failures", Tags: errTags, Value: 1},
+				{Name: "calls", Tags: tags, Value: 1},
+				{Name: "panics", Tags: tags, Value: 1},
+				{Name: "successes", Tags: tags, Value: 0},
+			},
+			Histograms: []metrics.HistogramSnapshot{
+				{
+					Name:   "caller_failure_latency_ms",
+					Tags:   tags,
+					Unit:   time.Millisecond,
+					Values: []int64{1}, // XXX this test flaps mysteriously. This figure is sometimes higher.
+				},
+				{
+					Name:   "request_payload_size_bytes",
+					Tags:   tags,
+					Unit:   time.Millisecond,
+					Values: []int64{0},
+				},
+				{
+					Name:   "response_payload_size_bytes",
+					Tags:   tags,
+					Unit:   time.Millisecond,
+					Values: []int64{0},
+				},
+				{
+					Name: "server_failure_latency_ms",
+					Tags: tags,
+					Unit: time.Millisecond,
+				},
+				{
+					Name: "success_latency_ms",
+					Tags: tags,
+					Unit: time.Millisecond,
+				},
+			},
+		}
+		assert.Equal(t, want, root.Snapshot(), "unexpected metrics snapshot")
+	})
+}
+
+func TestStreamingInboundApplicationPanics(t *testing.T) {
+	root := metrics.New()
+	scope := root.Scope()
+	mw := NewMiddleware(Config{
+		Logger:           zap.NewNop(),
+		Scope:            scope,
+		ContextExtractor: NewNopContextExtractor(),
+	})
+	stream, err := transport.NewServerStream(&fakeStream{
+		request: &transport.StreamRequest{
+			Meta: &transport.RequestMeta{
+				Caller:          "caller",
+				Service:         "service",
+				Transport:       "",
+				Encoding:        "raw",
+				Procedure:       "procedure",
+				ShardKey:        "sk",
+				RoutingKey:      "rk",
+				RoutingDelegate: "rd",
+			},
+		},
+	})
+	require.NoError(t, err)
+	newTags := func(direction directionName, withErr string) metrics.Tags {
+		tags := metrics.Tags{
+			"dest":             "service",
+			"direction":        string(direction),
+			"encoding":         "raw",
+			"procedure":        "procedure",
+			"routing_delegate": "rd",
+			"routing_key":      "rk",
+			"rpc_type":         transport.Streaming.String(),
+			"source":           "caller",
+			"transport":        "unknown",
+		}
+		if withErr != "" {
+			tags["error"] = withErr
+		}
+		return tags
+	}
+	tags := newTags(_directionInbound, "")
+	errTags := newTags(_directionInbound, "unknown_internal_yarpc")
+
+	t.Run("Test panic in HandleStream", func(t *testing.T) {
+		t.Skip() // This test flaps. https://github.com/yarpc/yarpc-go/issues/1882
+		// Relevant bucket marked XXX below.
+
+		// As our fake handler is mocked to panic in the call, test that the invocation panics
+		assert.Panics(t, func() {
+			err = mw.HandleStream(stream, &fakeHandler{applicationPanic: true})
+		})
+		require.NoError(t, err)
+
+		want := &metrics.RootSnapshot{
+			Counters: []metrics.Snapshot{
+				{Name: "calls", Tags: tags, Value: 1},
+				{Name: "panics", Tags: tags, Value: 1},
+				{Name: "server_failures", Tags: errTags, Value: 1},
+				{Name: "stream_receive_successes", Tags: tags, Value: 0},
+				{Name: "stream_receives", Tags: tags, Value: 0},
+				{Name: "stream_send_successes", Tags: tags, Value: 0},
+				{Name: "stream_sends", Tags: tags, Value: 0},
+				{Name: "successes", Tags: tags, Value: 1},
+			},
+			Gauges: []metrics.Snapshot{
+				{Name: "streams_active", Tags: tags, Value: 0},
+			},
+			Histograms: []metrics.HistogramSnapshot{
+				{Name: "stream_duration_ms", Tags: tags, Unit: time.Millisecond, Values: []int64{1}}, // XXX sometimes >1.
+			},
+		}
+		assert.Equal(t, want, root.Snapshot(), "unexpected metrics snapshot")
+	})
+
 }
 
 func TestStreamingMetrics(t *testing.T) {
@@ -1227,7 +2230,7 @@ func TestStreamingMetrics(t *testing.T) {
 		},
 	}
 
-	newTags := func(direction directionName, withErr string) metrics.Tags {
+	newTags := func(direction directionName, withErr string, withCallerFailureErrName string) metrics.Tags {
 		tags := metrics.Tags{
 			"dest":             "service",
 			"direction":        string(direction),
@@ -1242,6 +2245,9 @@ func TestStreamingMetrics(t *testing.T) {
 		if withErr != "" {
 			tags["error"] = withErr
 		}
+		if withCallerFailureErrName != "" {
+			tags[_errorNameMetricsKey] = withCallerFailureErrName
+		}
 		return tags
 	}
 
@@ -1254,11 +2260,25 @@ func TestStreamingMetrics(t *testing.T) {
 			ContextExtractor: NewNopContextExtractor(),
 		})
 
-		stream, err := transport.NewServerStream(&fakeStream{request: req})
+		stream, err := transport.NewServerStream(
+			&fakeStream{
+				request: req,
+				receiveMsg: &transport.StreamMessage{
+					Body:     readCloser{bytes.NewReader([]byte("Foobar"))},
+					BodySize: 6,
+				},
+			},
+		)
 		require.NoError(t, err)
 		err = mw.HandleStream(stream, &fakeHandler{
 			handleStream: func(stream *transport.ServerStream) {
-				err := stream.SendMessage(context.Background(), nil /*message*/)
+				err := stream.SendMessage(
+					context.Background(),
+					&transport.StreamMessage{
+						Body:     readCloser{bytes.NewReader([]byte("test"))},
+						BodySize: 4,
+					},
+				)
 				require.NoError(t, err)
 				_, err = stream.ReceiveMessage(context.Background())
 				require.NoError(t, err)
@@ -1266,12 +2286,13 @@ func TestStreamingMetrics(t *testing.T) {
 		require.NoError(t, err)
 
 		snap := root.Snapshot()
-		tags := newTags(_directionInbound, "")
+		tags := newTags(_directionInbound, "" /* withErr */, "" /* withCallerFailureErrName */)
 
 		// successful handshake, send, recv and close
 		want := &metrics.RootSnapshot{
 			Counters: []metrics.Snapshot{
 				{Name: "calls", Tags: tags, Value: 1},
+				{Name: "panics", Tags: tags, Value: 0},
 				{Name: "stream_receive_successes", Tags: tags, Value: 1},
 				{Name: "stream_receives", Tags: tags, Value: 1},
 				{Name: "stream_send_successes", Tags: tags, Value: 1},
@@ -1283,6 +2304,8 @@ func TestStreamingMetrics(t *testing.T) {
 			},
 			Histograms: []metrics.HistogramSnapshot{
 				{Name: "stream_duration_ms", Tags: tags, Unit: time.Millisecond, Values: []int64{1}},
+				{Name: "stream_request_payload_size_bytes", Tags: tags, Unit: time.Millisecond, Values: []int64{8}},
+				{Name: "stream_response_payload_size_bytes", Tags: tags, Unit: time.Millisecond, Values: []int64{4}},
 			},
 		}
 		assert.Equal(t, want, snap, "unexpected metrics snapshot")
@@ -1290,24 +2313,28 @@ func TestStreamingMetrics(t *testing.T) {
 
 	t.Run("error handler", func(t *testing.T) {
 		tests := []struct {
-			name    string
-			err     error
-			errName string
+			name       string
+			err        error
+			errName    string
+			appErrName string
 		}{
 			{
-				name:    "client fault",
-				err:     yarpcerrors.InvalidArgumentErrorf("client err"),
-				errName: yarpcerrors.CodeInvalidArgument.String(),
+				name:       "client fault",
+				err:        yarpcerrors.InvalidArgumentErrorf("client err"),
+				errName:    yarpcerrors.CodeInvalidArgument.String(),
+				appErrName: _notSet,
 			},
 			{
-				name:    "server fault",
-				err:     yarpcerrors.InternalErrorf("server err"),
-				errName: yarpcerrors.CodeInternal.String(),
+				name:       "server fault",
+				err:        yarpcerrors.InternalErrorf("server err"),
+				errName:    yarpcerrors.CodeInternal.String(),
+				appErrName: _notSet,
 			},
 			{
-				name:    "unknown fault",
-				err:     errors.New("unknown fault"),
-				errName: "unknown_internal_yarpc",
+				name:       "unknown fault",
+				err:        errors.New("unknown fault"),
+				errName:    "unknown_internal_yarpc",
+				appErrName: _notSet,
 			},
 		}
 
@@ -1327,20 +2354,22 @@ func TestStreamingMetrics(t *testing.T) {
 				require.Error(t, err)
 
 				snap := root.Snapshot()
-				successTags := newTags(_directionInbound, "")
-				errTags := newTags(_directionInbound, tt.errName)
+				successTags := newTags(_directionInbound, "", "")
+				errTags := newTags(_directionInbound, tt.errName, tt.appErrName)
 
-				// so we don't have create a sorting implementaion, manually place the
+				// so we don't have create a sorting implementation, manually place the
 				// first two expected counter snapshots, based on the error fault.
 				counters := make([]metrics.Snapshot, 0, 10)
-				if statusFault(yarpcerrors.FromError(tt.err)) == clientFault {
+				if faultFromCode(yarpcerrors.FromError(tt.err).Code()) == clientFault {
 					counters = append(counters,
 						metrics.Snapshot{Name: "caller_failures", Tags: errTags, Value: 1},
-						metrics.Snapshot{Name: "calls", Tags: successTags, Value: 1})
+						metrics.Snapshot{Name: "calls", Tags: successTags, Value: 1},
+						metrics.Snapshot{Name: "panics", Tags: successTags, Value: 0})
 
 				} else {
 					counters = append(counters,
 						metrics.Snapshot{Name: "calls", Tags: successTags, Value: 1},
+						metrics.Snapshot{Name: "panics", Tags: successTags, Value: 0},
 						metrics.Snapshot{Name: "server_failures", Tags: errTags, Value: 1})
 				}
 
@@ -1358,6 +2387,8 @@ func TestStreamingMetrics(t *testing.T) {
 					},
 					Histograms: []metrics.HistogramSnapshot{
 						{Name: "stream_duration_ms", Tags: successTags, Unit: time.Millisecond, Values: []int64{1}},
+						{Name: "stream_request_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
+						{Name: "stream_response_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
 					},
 				}
 				assert.Equal(t, want, snap, "unexpected metrics snapshot")
@@ -1394,12 +2425,13 @@ func TestStreamingMetrics(t *testing.T) {
 		require.NoError(t, err)
 
 		snap := root.Snapshot()
-		successTags := newTags(_directionInbound, "")
-		errTags := newTags(_directionInbound, "unknown_internal_yarpc")
+		successTags := newTags(_directionInbound, "", "")
+		errTags := newTags(_directionInbound, "unknown_internal_yarpc", "")
 
 		want := &metrics.RootSnapshot{
 			Counters: []metrics.Snapshot{
 				{Name: "calls", Tags: successTags, Value: 1},
+				{Name: "panics", Tags: successTags, Value: 0},
 				{Name: "stream_receive_failures", Tags: errTags, Value: 1},
 				{Name: "stream_receive_successes", Tags: successTags, Value: 0},
 				{Name: "stream_receives", Tags: successTags, Value: 1},
@@ -1413,6 +2445,8 @@ func TestStreamingMetrics(t *testing.T) {
 			},
 			Histograms: []metrics.HistogramSnapshot{
 				{Name: "stream_duration_ms", Tags: successTags, Unit: time.Millisecond, Values: []int64{1}},
+				{Name: "stream_request_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
+				{Name: "stream_response_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
 			},
 		}
 		assert.Equal(t, want, snap, "unexpected metrics snapshot")
@@ -1436,12 +2470,13 @@ func TestStreamingMetrics(t *testing.T) {
 		require.NoError(t, stream.Close(context.Background()))
 
 		snap := root.Snapshot()
-		tags := newTags(_directionOutbound, "")
+		tags := newTags(_directionOutbound, "", "")
 
 		// successful handshake, send, recv and close
 		want := &metrics.RootSnapshot{
 			Counters: []metrics.Snapshot{
 				{Name: "calls", Tags: tags, Value: 1},
+				{Name: "panics", Tags: tags, Value: 0},
 				{Name: "stream_receive_successes", Tags: tags, Value: 1},
 				{Name: "stream_receives", Tags: tags, Value: 1},
 				{Name: "stream_send_successes", Tags: tags, Value: 1},
@@ -1453,6 +2488,8 @@ func TestStreamingMetrics(t *testing.T) {
 			},
 			Histograms: []metrics.HistogramSnapshot{
 				{Name: "stream_duration_ms", Tags: tags, Unit: time.Millisecond, Values: []int64{1}},
+				{Name: "stream_request_payload_size_bytes", Tags: tags, Unit: time.Millisecond},
+				{Name: "stream_response_payload_size_bytes", Tags: tags, Unit: time.Millisecond},
 			},
 		}
 		assert.Equal(t, want, snap, "unexpected metrics snapshot")
@@ -1472,14 +2509,15 @@ func TestStreamingMetrics(t *testing.T) {
 		require.Error(t, err)
 
 		snap := root.Snapshot()
-		successTags := newTags(_directionOutbound, "")
-		errTags := newTags(_directionOutbound, "unknown_internal_yarpc")
+		successTags := newTags(_directionOutbound, "", "")
+		errTags := newTags(_directionOutbound, "unknown_internal_yarpc", _notSet)
 
 		want := &metrics.RootSnapshot{
 			// only the failure vector counters will have an error value passed
 			// into tags()
 			Counters: []metrics.Snapshot{
 				{Name: "calls", Tags: successTags, Value: 1},
+				{Name: "panics", Tags: successTags, Value: 0},
 				{Name: "server_failures", Tags: errTags, Value: 1},
 				{Name: "stream_receive_successes", Tags: successTags, Value: 0},
 				{Name: "stream_receives", Tags: successTags, Value: 0},
@@ -1492,6 +2530,8 @@ func TestStreamingMetrics(t *testing.T) {
 			},
 			Histograms: []metrics.HistogramSnapshot{
 				{Name: "stream_duration_ms", Tags: successTags, Unit: time.Millisecond},
+				{Name: "stream_request_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
+				{Name: "stream_response_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
 			},
 		}
 		assert.Equal(t, want, snap, "unexpected metrics snapshot")
@@ -1526,14 +2566,16 @@ func TestStreamingMetrics(t *testing.T) {
 		require.Error(t, err)
 
 		snap := root.Snapshot()
-		successTags := newTags(_directionOutbound, "")
-		errTags := newTags(_directionOutbound, "unknown_internal_yarpc")
+		successTags := newTags(_directionOutbound, "", "")
+		errTags := newTags(_directionOutbound, "unknown_internal_yarpc", "")
+		serverFailureTags := newTags(_directionOutbound, "unknown_internal_yarpc", _notSet)
 
 		// successful handshake, send, recv and close
 		want := &metrics.RootSnapshot{
 			Counters: []metrics.Snapshot{
 				{Name: "calls", Tags: successTags, Value: 1},
-				{Name: "server_failures", Tags: errTags, Value: 1},
+				{Name: "panics", Tags: successTags, Value: 0},
+				{Name: "server_failures", Tags: serverFailureTags, Value: 1},
 				{Name: "stream_receive_failures", Tags: errTags, Value: 1},
 				{Name: "stream_receive_successes", Tags: successTags, Value: 0},
 				{Name: "stream_receives", Tags: successTags, Value: 1},
@@ -1547,8 +2589,37 @@ func TestStreamingMetrics(t *testing.T) {
 			},
 			Histograms: []metrics.HistogramSnapshot{
 				{Name: "stream_duration_ms", Tags: successTags, Unit: time.Millisecond, Values: []int64{1}},
+				{Name: "stream_request_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
+				{Name: "stream_response_payload_size_bytes", Tags: successTags, Unit: time.Millisecond},
 			},
 		}
 		assert.Equal(t, want, snap, "unexpected metrics snapshot")
 	})
+}
+
+func TestNewWriterIsEmpty(t *testing.T) {
+	code := yarpcerrors.CodeDataLoss
+
+	// set all fields on the response writer
+	w := newWriter(&transporttest.FakeResponseWriter{})
+	require.NotNil(t, w, "writer must not be nil")
+
+	w.SetApplicationError()
+	w.SetApplicationErrorMeta(&transport.ApplicationErrorMeta{
+		Details: "foo", Name: "bar", Code: &code,
+	})
+	w.free()
+
+	w = newWriter(nil /*transport.ResponseWriter*/)
+	require.NotNil(t, w, "writer must not be nil")
+	assert.Equal(t, writer{}, *w,
+		"expected empty writer, fields were likely not cleared in the pool")
+}
+
+type readCloser struct {
+	*bytes.Reader
+}
+
+func (r readCloser) Close() error {
+	return nil
 }

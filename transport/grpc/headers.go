@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -65,6 +65,13 @@ const (
 	// ApplicationErrorHeader is the header key that will contain a non-empty value
 	// if there was an application error.
 	ApplicationErrorHeader = "rpc-application-error"
+
+	// _applicationErrorNameHeader is the header for the name of the application
+	// error.
+	_applicationErrorNameHeader = "rpc-application-error-name"
+	// _applicationErrorDetailsHeader is the header for the the application error
+	// meta details string.
+	_applicationErrorDetailsHeader = "rpc-application-error-details"
 
 	// ApplicationErrorHeaderValue is the value that will be set for
 	// ApplicationErrorHeader is there was an application error.
@@ -143,6 +150,28 @@ func metadataToTransportRequest(md metadata.MD) (*transport.Request, error) {
 		}
 	}
 	return request, nil
+}
+
+func metadataToApplicationErrorMeta(responseMD metadata.MD) *transport.ApplicationErrorMeta {
+	if responseMD == nil {
+		return nil
+	}
+
+	var details, name string
+	if header := responseMD[_applicationErrorDetailsHeader]; len(header) == 1 {
+		details = header[0]
+	}
+	if header := responseMD[_applicationErrorNameHeader]; len(header) == 1 {
+		name = header[0]
+	}
+
+	return &transport.ApplicationErrorMeta{
+		Details: details,
+		Name:    name,
+		// ignore Code, this should be derived from the error since codes are
+		// natively supported in gRPC and YARPC
+		Code: nil,
+	}
 }
 
 // addApplicationHeaders adds the headers to md.

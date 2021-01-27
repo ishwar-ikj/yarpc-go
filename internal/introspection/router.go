@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,8 +33,7 @@ type Procedure struct {
 }
 
 // IntrospectProcedures is a convenience function that translate a slice of
-// transport.Procedure to a slice of introspection.Procedure. This output is
-// used in debug and yarpcmeta.
+// transport.Procedure to a slice of introspection.Procedure.
 func IntrospectProcedures(routerProcs []transport.Procedure) []Procedure {
 	procedures := make([]Procedure, 0, len(routerProcs))
 	for _, p := range routerProcs {

@@ -1,4 +1,4 @@
-DOCKER_GO_VERSION ?= 1.12
+DOCKER_GO_VERSION ?= 1.14
 DOCKERFILE := Dockerfile.$(DOCKER_GO_VERSION)
 DOCKER_IMAGE := uber/yarpc-go-$(DOCKER_GO_VERSION)
 
@@ -79,6 +79,10 @@ test: deps ## run all tests
 .PHONY: cover
 cover: deps ## run all tests and output code coverage
 	PATH=$$PATH:$(BIN) docker run $(DOCKER_RUN_FLAGS) $(DOCKER_IMAGE) make cover
+
+.PHONY: crossdock-cover
+crossdock-cover: deps
+	PATH=$$PATH:$(BIN) docker run $(DOCKER_RUN_FLAGS) $(DOCKER_IMAGE) make crossdock-cover
 
 .PHONY: codecov
 codecov: SHELL := /bin/bash

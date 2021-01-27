@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -26,10 +26,10 @@ import (
 	"testing"
 
 	"go.uber.org/yarpc/api/transport"
-	"go.uber.org/yarpc/internal/examples/protobuf/example"
-	"go.uber.org/yarpc/internal/examples/protobuf/examplepb"
-	"go.uber.org/yarpc/internal/examples/protobuf/exampleutil"
 	"go.uber.org/yarpc/internal/grpcctx"
+	"go.uber.org/yarpc/internal/prototest/example"
+	"go.uber.org/yarpc/internal/prototest/examplepb"
+	"go.uber.org/yarpc/internal/prototest/exampleutil"
 	"go.uber.org/yarpc/internal/testutils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
@@ -75,9 +75,8 @@ func BenchmarkIntegrationGRPCAll(b *testing.B) {
 
 func benchmarkForTransportType(b *testing.B, transportType testutils.TransportType, f func(*exampleutil.Clients) error) {
 	keyValueYARPCServer := example.NewKeyValueYARPCServer()
-	sinkYARPCServer := example.NewSinkYARPCServer(false)
 	fooYARPCServer := example.NewFooYARPCServer(transport.NewHeaders())
-	exampleutil.WithClients(transportType, keyValueYARPCServer, sinkYARPCServer, fooYARPCServer, nil, f)
+	exampleutil.WithClients(transportType, keyValueYARPCServer, fooYARPCServer, nil, f)
 }
 
 func benchmarkIntegrationYARPC(b *testing.B, keyValueYARPCClient examplepb.KeyValueYARPCClient) {

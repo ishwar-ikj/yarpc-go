@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,11 +22,16 @@ package http
 
 import "time"
 
-const transportName = "http"
+// TransportName is the name of the transport.
+//
+// This value is what is used as transport.Request#Transport and transport.Namer
+// for Outbounds.
+const TransportName = "http"
 
 var (
 	defaultConnTimeout     = 500 * time.Millisecond
 	defaultInnocenceWindow = 5 * time.Second
+	defaultIdleConnTimeout = 15 * time.Minute
 )
 
 // HTTP headers used in requests and responses to send YARPC metadata.
@@ -92,6 +97,18 @@ const (
 	// feature is supported on the server. If any non-empty value is set,
 	// this indicates true.
 	BothResponseErrorHeader = "Rpc-Both-Response-Error"
+)
+
+const (
+	// Headers for propagating transport.ApplicationErrorMeta.
+	_applicationErrorNameHeader    = "Rpc-Application-Error-Name"
+	_applicationErrorCodeHeader    = "Rpc-Application-Error-Code"
+	_applicationErrorDetailsHeader = "Rpc-Application-Error-Details"
+
+	// largest header value length for `transport.ApplicationErrorMeta#Details`
+	_maxAppErrDetailsHeaderLen = 256
+	// truncated message if we've exceeded the '_maxAppErrDetailsHeaderLen'
+	_truncatedHeaderMessage = " (truncated)"
 )
 
 // Valid values for the Rpc-Status header.

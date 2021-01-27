@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,13 +20,17 @@
 
 package introspection
 
+import (
+	xintrospection "go.uber.org/yarpc/api/x/introspection"
+)
+
 // DispatcherStatus represent detailed introspection information about a
 // dispatcher.
 type DispatcherStatus struct {
-	Name            string           `json:"name"`
-	ID              string           `json:"id"`
-	Procedures      []Procedure      `json:"procedures"`
-	Inbounds        []InboundStatus  `json:"inbounds"`
-	Outbounds       []OutboundStatus `json:"outbounds"`
-	PackageVersions []PackageVersion `json:"packageVersions"`
+	Name            string                          `json:"name"`
+	ID              string                          `json:"id"`
+	Procedures      []Procedure                     `json:"procedures"`
+	Inbounds        []xintrospection.InboundStatus  `json:"inbounds"`
+	Outbounds       []xintrospection.OutboundStatus `json:"outbounds"`
+	PackageVersions []PackageVersion                `json:"packageVersions"`
 }

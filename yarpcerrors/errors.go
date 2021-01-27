@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@ package yarpcerrors
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 )
 
@@ -32,54 +33,84 @@ func Newf(code Code, format string, args ...interface{}) *Status {
 	if code == CodeOK {
 		return nil
 	}
+
+	var err error
+	if len(args) == 0 {
+		err = errors.New(format)
+	} else {
+		err = fmt.Errorf(format, args...)
+	}
+
 	return &Status{
-		code:    code,
-		message: sprintf(format, args...),
+		code: code,
+		err:  err,
 	}
 }
 
 type yarpcError interface{ YARPCError() *Status }
 
-// FromError returns the Status for the provided error. If the underlying type
-// is Status, it returns itself. If the underlying error has a
-// YARPCError() *Status function, it calls the function and returns the
-// Status type. If the provided error is not a Status, a new error with
-// code CodeUnknown is returned.
+// FromError returns the Status for the provided error.
 //
-// Returns nil if the provided error is nil.
+// If the error:
+//  - is nil, return nil
+//  - is a 'Status', return the 'Status'
+//  - has a 'YARPCError() *Status' method, returns the 'Status'
+// Otherwise, return a wrapped error with code 'CodeUnknown'.
 func FromError(err error) *Status {
 	if err == nil {
 		return nil
 	}
-	if status, ok := err.(*Status); ok {
-		return status
+
+	if st, ok := fromError(err); ok {
+		return st
 	}
-	if statusImpl, ok := err.(yarpcError); ok {
-		return statusImpl.YARPCError()
-	}
+
+	// Extra wrapping ensures Unwrap works consistently across *Status created
+	// by FromError and Newf.
+	// https://github.com/yarpc/yarpc-go/pull/1966
 	return &Status{
-		code:    CodeUnknown,
-		message: err.Error(),
+		code: CodeUnknown,
+		err:  &wrapError{err: err},
 	}
 }
 
-// IsStatus returns whether the provided error is a YARPC error, or has a
-// YARPCError() function to represent the error as a YARPC error.
-//
-// This is always false if the error is nil.
-func IsStatus(err error) bool {
-	switch err.(type) {
-	case *Status, yarpcError:
-		return true
+func fromError(err error) (st *Status, ok bool) {
+	if errors.As(err, &st) {
+		return st, true
 	}
-	return false
+
+	var yerr yarpcError
+	if errors.As(err, &yerr) {
+		return yerr.YARPCError(), true
+	}
+	return nil, false
+}
+
+// Unwrap supports errors.Unwrap.
+//
+// See "errors" package documentation for details.
+func (s *Status) Unwrap() error {
+	if s == nil {
+		return nil
+	}
+	return errors.Unwrap(s.err)
+}
+
+// IsStatus returns whether the provided error is a YARPC error, or has a
+// YARPCError() function to represent the error as a YARPC error. This includes
+// wrapped errors.
+//
+// This is false if the error is nil.
+func IsStatus(err error) bool {
+	_, ok := fromError(err)
+	return ok
 }
 
 // Status represents a YARPC error.
 type Status struct {
 	code    Code
 	name    string
-	message string
+	err     error
 	details []byte
 }
 
@@ -98,7 +129,7 @@ func (s *Status) WithName(name string) *Status {
 	return &Status{
 		code:    s.code,
 		name:    name,
-		message: s.message,
+		err:     s.err,
 		details: s.details,
 	}
 }
@@ -116,7 +147,7 @@ func (s *Status) WithDetails(details []byte) *Status {
 	return &Status{
 		code:    s.code,
 		name:    s.name,
-		message: s.message,
+		err:     s.err,
 		details: details,
 	}
 }
@@ -145,7 +176,7 @@ func (s *Status) Message() string {
 	if s == nil {
 		return ""
 	}
-	return s.message
+	return s.err.Error()
 }
 
 // Details returns the error details for this Status.
@@ -165,11 +196,32 @@ func (s *Status) Error() string {
 		_, _ = buffer.WriteString(` name:`)
 		_, _ = buffer.WriteString(s.name)
 	}
-	if s.message != "" {
+	if s.err != nil && s.err.Error() != "" {
 		_, _ = buffer.WriteString(` message:`)
-		_, _ = buffer.WriteString(s.message)
+		_, _ = buffer.WriteString(s.err.Error())
 	}
 	return buffer.String()
+}
+
+// wrapError does what it says on the tin.
+type wrapError struct {
+	err error
+}
+
+// Error returns the inner error message.
+func (e *wrapError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+// Unwrap returns the inner error.
+func (e *wrapError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 // CancelledErrorf returns a new Status with code CodeCancelled
@@ -409,11 +461,4 @@ func NamedErrorf(name string, format string, args ...interface{}) error {
 // Deprecated: Use Newf and WithName instead.
 func FromHeaders(code Code, name string, message string) error {
 	return Newf(code, message).WithName(name)
-}
-
-func sprintf(format string, args ...interface{}) string {
-	if len(args) == 0 {
-		return format
-	}
-	return fmt.Sprintf(format, args...)
 }

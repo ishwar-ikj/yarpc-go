@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,10 +21,13 @@
 package observability
 
 import (
+	"bytes"
 	"context"
+	"io/ioutil"
 	"time"
 
 	"go.uber.org/yarpc/api/transport"
+	"go.uber.org/yarpc/yarpcerrors"
 )
 
 type fakeAck struct{}
@@ -32,23 +35,50 @@ type fakeAck struct{}
 func (a fakeAck) String() string { return "" }
 
 type fakeHandler struct {
-	err            error
-	applicationErr bool
-	handleStream   func(*transport.ServerStream)
+	err                   error
+	applicationErr        bool
+	applicationErrName    string
+	applicationErrDetails string
+	applicationErrCode    *yarpcerrors.Code
+	applicationPanic      bool
+	handleStream          func(*transport.ServerStream)
+	responseData          []byte
 }
 
 func (h fakeHandler) Handle(_ context.Context, _ *transport.Request, rw transport.ResponseWriter) error {
+	if h.applicationPanic {
+		panic("application panicked")
+	}
 	if h.applicationErr {
 		rw.SetApplicationError()
+
+		if applicationErrorMetaSetter, ok := rw.(transport.ApplicationErrorMetaSetter); ok {
+			applicationErrorMetaSetter.SetApplicationErrorMeta(&transport.ApplicationErrorMeta{
+				Details: h.applicationErrDetails,
+				Name:    h.applicationErrName,
+				Code:    h.applicationErrCode,
+			})
+		}
 	}
+
+	if h.responseData != nil {
+		rw.Write(h.responseData)
+	}
+
 	return h.err
 }
 
 func (h fakeHandler) HandleOneway(context.Context, *transport.Request) error {
+	if h.applicationPanic {
+		panic("application panicked")
+	}
 	return h.err
 }
 
 func (h fakeHandler) HandleStream(stream *transport.ServerStream) error {
+	if h.applicationPanic {
+		panic("application panicked")
+	}
 	if h.handleStream != nil {
 		h.handleStream(stream)
 	}
@@ -58,16 +88,26 @@ func (h fakeHandler) HandleStream(stream *transport.ServerStream) error {
 type fakeOutbound struct {
 	transport.Outbound
 
-	err            error
-	applicationErr bool
-	stream         fakeStream
+	err                   error
+	applicationErr        bool
+	applicationErrName    string
+	applicationErrDetails string
+	applicationErrCode    *yarpcerrors.Code
+	stream                fakeStream
+
+	body []byte
 }
 
 func (o fakeOutbound) Call(context.Context, *transport.Request) (*transport.Response, error) {
-	if o.err != nil {
-		return nil, o.err
-	}
-	return &transport.Response{ApplicationError: o.applicationErr}, nil
+	return &transport.Response{
+		ApplicationError: o.applicationErr,
+		ApplicationErrorMeta: &transport.ApplicationErrorMeta{
+			Details: o.applicationErrDetails,
+			Name:    o.applicationErrName,
+			Code:    o.applicationErrCode,
+		},
+		Body:     ioutil.NopCloser(bytes.NewReader(o.body)),
+		BodySize: len(o.body)}, o.err
 }
 
 func (o fakeOutbound) CallOneway(context.Context, *transport.Request) (transport.Ack, error) {
@@ -94,6 +134,8 @@ type fakeStream struct {
 	ctx     context.Context
 	request *transport.StreamRequest
 
+	receiveMsg *transport.StreamMessage
+
 	sendErr    error
 	receiveErr error
 	closeErr   error
@@ -112,7 +154,7 @@ func (s *fakeStream) SendMessage(context.Context, *transport.StreamMessage) erro
 }
 
 func (s *fakeStream) ReceiveMessage(context.Context) (*transport.StreamMessage, error) {
-	return nil, s.receiveErr
+	return s.receiveMsg, s.receiveErr
 }
 
 func (s *fakeStream) Close(context.Context) error {
@@ -120,7 +162,11 @@ func (s *fakeStream) Close(context.Context) error {
 }
 
 func stubTime() func() {
+	return stubTimeWithTimeVal(time.Time{})
+}
+
+func stubTimeWithTimeVal(timeVal time.Time) func() {
 	prev := _timeNow
-	_timeNow = func() time.Time { return time.Time{} }
+	_timeNow = func() time.Time { return timeVal }
 	return func() { _timeNow = prev }
 }

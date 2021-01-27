@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -45,7 +45,7 @@ func Run(t crossdock.T) {
 	case "thrift":
 		Thrift(t, dispatcher, serverCalledBack, callBackAddr)
 	case "protobuf":
-		Protobuf(t, dispatcher, serverCalledBack, callBackAddr)
+		// skip
 	default:
 		crossdock.Fatals(t).Fail("unknown encoding", "%v", encoding)
 	}

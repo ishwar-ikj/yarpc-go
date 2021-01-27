@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,19 @@ package tchannel
 
 import "time"
 
-const transportName = "tchannel"
+const (
+	// TransportName is the name of the transport.
+	//
+	// This value is what is used as transport.Request#Transport and transport.Namer
+	// for Outbounds.
+	TransportName = "tchannel"
+
+	// largest header value length for `transport.ApplicationErrorMeta#Details`
+	_maxAppErrDetailsHeaderLen = 256
+	// truncated message if we've exceeded the '_maxAppErrDetailsHeaderLen'
+	_truncatedHeaderMessage = " (truncated)"
+
+	_defaultBufferSize = 1024 // 1k
+)
 
 var defaultConnTimeout = 500 * time.Millisecond

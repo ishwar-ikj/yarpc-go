@@ -9,6 +9,7 @@ import (
 	transport "go.uber.org/yarpc/api/transport"
 	thrift "go.uber.org/yarpc/encoding/thrift"
 	common "go.uber.org/yarpc/encoding/thrift/thriftrw-plugin-yarpc/internal/tests/common"
+	yarpcerrors "go.uber.org/yarpc/yarpcerrors"
 )
 
 // Interface is the server-side interface for the BaseService service.
@@ -49,21 +50,36 @@ func New(impl Interface, opts ...thrift.RegisterOption) []transport.Procedure {
 
 type handler struct{ impl Interface }
 
+type yarpcErrorNamer interface{ YARPCErrorName() string }
+
+type yarpcErrorCoder interface{ YARPCErrorCode() *yarpcerrors.Code }
+
 func (h handler) Healthy(ctx context.Context, body wire.Value) (thrift.Response, error) {
 	var args common.BaseService_Healthy_Args
 	if err := args.FromWire(body); err != nil {
-		return thrift.Response{}, err
+		return thrift.Response{}, yarpcerrors.InvalidArgumentErrorf(
+			"could not decode Thrift request for service 'BaseService' procedure 'Healthy': %w", err)
 	}
 
-	success, err := h.impl.Healthy(ctx)
+	success, appErr := h.impl.Healthy(ctx)
 
-	hadError := err != nil
-	result, err := common.BaseService_Healthy_Helper.WrapResponse(success, err)
+	hadError := appErr != nil
+	result, err := common.BaseService_Healthy_Helper.WrapResponse(success, appErr)
 
 	var response thrift.Response
 	if err == nil {
 		response.IsApplicationError = hadError
 		response.Body = result
+		if namer, ok := appErr.(yarpcErrorNamer); ok {
+			response.ApplicationErrorName = namer.YARPCErrorName()
+		}
+		if extractor, ok := appErr.(yarpcErrorCoder); ok {
+			response.ApplicationErrorCode = extractor.YARPCErrorCode()
+		}
+		if appErr != nil {
+			response.ApplicationErrorDetails = appErr.Error()
+		}
 	}
+
 	return response, err
 }

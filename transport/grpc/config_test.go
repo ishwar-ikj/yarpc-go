@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@ package grpc
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -30,6 +31,8 @@ import (
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/peer"
 	"go.uber.org/yarpc/yarpcconfig"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 )
 
 func TestNewTransportSpecOptions(t *testing.T) {
@@ -44,37 +47,37 @@ func TestNewTransportSpecOptions(t *testing.T) {
 
 func TestConfigBuildInboundOtherTransport(t *testing.T) {
 	transportSpec := &transportSpec{}
-	_, err := transportSpec.buildInbound(&InboundConfig{}, testTransport{}, nil)
+	_, err := transportSpec.buildInbound(&InboundConfig{}, testTransport{}, _kit)
 	require.Equal(t, newTransportCastError(testTransport{}), err)
 }
 
 func TestConfigBuildInboundRequiredAddress(t *testing.T) {
 	transportSpec := &transportSpec{}
-	_, err := transportSpec.buildInbound(&InboundConfig{}, NewTransport(), nil)
+	_, err := transportSpec.buildInbound(&InboundConfig{}, NewTransport(), _kit)
 	require.Equal(t, newRequiredFieldMissingError("address"), err)
 }
 
 func TestConfigBuildUnaryOutboundOtherTransport(t *testing.T) {
 	transportSpec := &transportSpec{}
-	_, err := transportSpec.buildUnaryOutbound(&OutboundConfig{}, testTransport{}, nil)
+	_, err := transportSpec.buildUnaryOutbound(&OutboundConfig{}, testTransport{}, _kit)
 	require.Equal(t, newTransportCastError(testTransport{}), err)
 }
 
 func TestConfigBuildUnaryOutboundRequiredAddress(t *testing.T) {
 	transportSpec := &transportSpec{}
-	_, err := transportSpec.buildUnaryOutbound(&OutboundConfig{}, NewTransport(), nil)
+	_, err := transportSpec.buildUnaryOutbound(&OutboundConfig{}, NewTransport(), _kit)
 	require.Equal(t, newRequiredFieldMissingError("address"), err)
 }
 
 func TestConfigBuildStreamOutboundOtherTransport(t *testing.T) {
 	transportSpec := &transportSpec{}
-	_, err := transportSpec.buildStreamOutbound(&OutboundConfig{}, testTransport{}, nil)
+	_, err := transportSpec.buildStreamOutbound(&OutboundConfig{}, testTransport{}, _kit)
 	require.Equal(t, newTransportCastError(testTransport{}), err)
 }
 
 func TestConfigBuildStreamOutboundRequiredAddress(t *testing.T) {
 	transportSpec := &transportSpec{}
-	_, err := transportSpec.buildStreamOutbound(&OutboundConfig{}, NewTransport(), nil)
+	_, err := transportSpec.buildStreamOutbound(&OutboundConfig{}, NewTransport(), _kit)
 	require.Equal(t, newRequiredFieldMissingError("address"), err)
 }
 
@@ -95,8 +98,10 @@ func TestTransportSpec(t *testing.T) {
 	}
 
 	type wantOutbound struct {
-		Address string
-		TLS     bool
+		Address                 string
+		TLS                     bool
+		Compressor              string
+		WantCustomContextDialer bool
 	}
 
 	type test struct {
@@ -133,7 +138,7 @@ func TestTransportSpec(t *testing.T) {
 			desc: "simple outbound",
 			outboundCfg: attrs{
 				"myservice": attrs{
-					transportName: attrs{"address": "localhost:54569"},
+					TransportName: attrs{"address": "localhost:54569"},
 				},
 			},
 			wantOutbounds: map[string]wantOutbound{
@@ -143,10 +148,27 @@ func TestTransportSpec(t *testing.T) {
 			},
 		},
 		{
+			desc: "simple outbound with compressor",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{
+						"address":    "localhost:54569",
+						"compressor": "gzip",
+					},
+				},
+			},
+			wantOutbounds: map[string]wantOutbound{
+				"myservice": {
+					Address:    "localhost:54569",
+					Compressor: "gzip",
+				},
+			},
+		},
+		{
 			desc: "outbound interpolation",
 			outboundCfg: attrs{
 				"myservice": attrs{
-					transportName: attrs{"address": "${ADDR}"},
+					TransportName: attrs{"address": "${ADDR}"},
 				},
 			},
 			env: map[string]string{"ADDR": "127.0.0.1:54570"},
@@ -160,7 +182,7 @@ func TestTransportSpec(t *testing.T) {
 			desc: "simple outbound with peer",
 			outboundCfg: attrs{
 				"myservice": attrs{
-					transportName: attrs{"peer": "localhost:54569"},
+					TransportName: attrs{"peer": "localhost:54569"},
 				},
 			},
 		},
@@ -168,7 +190,7 @@ func TestTransportSpec(t *testing.T) {
 			desc: "outbound bad peer list",
 			outboundCfg: attrs{
 				"myservice": attrs{
-					transportName: attrs{
+					TransportName: attrs{
 						"least-pending": []string{
 							"127.0.0.1:8080",
 							"127.0.0.1:8081",
@@ -186,7 +208,7 @@ func TestTransportSpec(t *testing.T) {
 			desc: "unknown preset",
 			outboundCfg: attrs{
 				"myservice": attrs{
-					transportName: attrs{"with": "derp"},
+					TransportName: attrs{"with": "derp"},
 				},
 			},
 			wantErrors: []string{
@@ -240,7 +262,7 @@ func TestTransportSpec(t *testing.T) {
 			desc: "TLS enabled on an outbound",
 			outboundCfg: attrs{
 				"myservice": attrs{
-					transportName: attrs{
+					TransportName: attrs{
 						"address": "localhost:54816",
 						"tls": attrs{
 							"enabled": true,
@@ -252,6 +274,23 @@ func TestTransportSpec(t *testing.T) {
 				"myservice": {
 					Address: "localhost:54816",
 					TLS:     true,
+				},
+			},
+		},
+		{
+			desc: "simple outbound with custom dialer option",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{"address": "localhost:54569"},
+				},
+			},
+			opts: []Option{ContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "TCP", addr)
+			})},
+			wantOutbounds: map[string]wantOutbound{
+				"myservice": {
+					Address:                 "localhost:54569",
+					WantCustomContextDialer: true,
 				},
 			},
 		},
@@ -270,10 +309,10 @@ func TestTransportSpec(t *testing.T) {
 
 			cfgData := make(attrs)
 			if tt.transportCfg != nil {
-				cfgData["transports"] = attrs{transportName: tt.transportCfg}
+				cfgData["transports"] = attrs{TransportName: tt.transportCfg}
 			}
 			if tt.inboundCfg != nil {
-				cfgData["inbounds"] = attrs{transportName: tt.inboundCfg}
+				cfgData["inbounds"] = attrs{TransportName: tt.inboundCfg}
 			}
 			if tt.outboundCfg != nil {
 				cfgData["outbounds"] = tt.outboundCfg
@@ -335,10 +374,64 @@ func TestTransportSpec(t *testing.T) {
 					dialer, ok := single.Transport().(*Dialer)
 					require.True(t, ok, "expected *Dialer, got %T", single.Transport())
 					assert.Equal(t, wantOutbound.TLS, dialer.options.creds != nil)
+					if wantOutbound.WantCustomContextDialer {
+						assert.NotNil(t, dialer.options.contextDialer, "expected custom context dialer")
+					}
 				}
 			}
 		})
 	}
+}
+
+func TestContextDialerOptionUsage(t *testing.T) {
+	type attrs map[string]interface{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer lis.Close()
+	server := grpc.NewServer()
+	defer server.Stop()
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+
+	dialContextInvoked := 0
+	dialer := func(ctx context.Context, addr string) (net.Conn, error) {
+		dialContextInvoked++
+		return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	}
+	configurator := yarpcconfig.New()
+	require.NoError(t, configurator.RegisterTransport(TransportSpec(ContextDialer(dialer))))
+	cfgData := attrs{
+		"outbounds": attrs{
+			"myservice": attrs{
+				TransportName: attrs{"address": lis.Addr().String()},
+			},
+		},
+	}
+	cfg, err := configurator.LoadConfig("myservice", cfgData)
+	require.NoError(t, err)
+	outbound, ok := cfg.Outbounds["myservice"].Unary.(*Outbound)
+	require.True(t, ok, "expected a gRPC outbound")
+	require.NoError(t, outbound.Start())
+	defer outbound.Stop()
+
+	peer, _, err := outbound.peerChooser.Choose(ctx, &transport.Request{})
+	require.NoError(t, err)
+	grpcPeer, ok := peer.(*grpcPeer)
+	require.True(t, ok, "expected a gRPC peer")
+
+	for {
+		state := grpcPeer.clientConn.GetState()
+		if state == connectivity.Ready {
+			break
+		}
+		grpcPeer.clientConn.WaitForStateChange(ctx, state)
+	}
+	require.Equal(t, connectivity.Ready, grpcPeer.clientConn.GetState(), "expected gRPC connection in Ready state")
+	require.Equal(t, 1, dialContextInvoked, "counter should increment by one from dialer invocation")
 }
 
 func mapResolver(m map[string]string) func(string) (string, bool) {

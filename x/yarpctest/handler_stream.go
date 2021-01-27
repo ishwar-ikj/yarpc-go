@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -141,5 +141,12 @@ func (o *orderedStreamHandler) HandleStream(s *transport.ServerStream) error {
 func StreamHandlerError(err error) api.ServerStreamAction {
 	return api.ServerStreamActionFunc(func(c *transport.ServerStream) error {
 		return err
+	})
+}
+
+// StreamSendHeaders is an action to send stream headers.
+func StreamSendHeaders(headers map[string]string) api.ServerStreamAction {
+	return api.ServerStreamActionFunc(func(c *transport.ServerStream) error {
+		return c.SendHeaders(transport.HeadersFromMap(headers))
 	})
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,16 +22,19 @@ package grpc
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/yarpc/yarpcerrors"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func TestInvalidStreamContext(t *testing.T) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:0"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	tran := NewTransport()
@@ -46,7 +49,7 @@ func TestInvalidStreamContext(t *testing.T) {
 }
 
 func TestInvalidStreamMethod(t *testing.T) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:0"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	tran := NewTransport()
@@ -61,7 +64,7 @@ func TestInvalidStreamMethod(t *testing.T) {
 }
 
 func TestInvalidStreamRequest(t *testing.T) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:0"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	tran := NewTransport()
@@ -77,7 +80,7 @@ func TestInvalidStreamRequest(t *testing.T) {
 }
 
 func TestInvalidStreamEmptyHeader(t *testing.T) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:0"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	tran := NewTransport()
@@ -98,7 +101,7 @@ func TestInvalidStreamEmptyHeader(t *testing.T) {
 }
 
 func TestInvalidStreamMultipleHeaders(t *testing.T) {
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:0"))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	tran := NewTransport()
@@ -114,4 +117,26 @@ func TestInvalidStreamMultipleHeaders(t *testing.T) {
 
 	require.Contains(t, err.Error(), "code:invalid-argument")
 	require.Contains(t, err.Error(), "header has more than one value: rpc-caller")
+}
+
+func TestToGRPCError(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		assert.Nil(t, toGRPCError(nil))
+	})
+
+	t.Run("gRPC status", func(t *testing.T) {
+		grpcSt := status.New(codes.InvalidArgument, "foo").Err()
+		assert.Equal(t, grpcSt, toGRPCError(grpcSt), "expected same error given")
+	})
+
+	t.Run("yarpcerror", func(t *testing.T) {
+		msg := "foo"
+		yErr := yarpcerrors.FailedPreconditionErrorf(msg)
+
+		grpcSt, ok := status.FromError(toGRPCError(yErr))
+		require.True(t, ok, "expected gRPC error")
+
+		assert.Equal(t, codes.FailedPrecondition, grpcSt.Code(), "code")
+		assert.Equal(t, msg, grpcSt.Message(), "message mismatch")
+	})
 }

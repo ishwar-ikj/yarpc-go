@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -66,6 +66,12 @@ type Request struct {
 
 	// Request payload.
 	Body io.Reader
+
+	// Request payload size before any compression applied by the protocol
+	// When using the HTTP transport, this value is set from the HTTP header
+	// content-length. It should be noted that this value is set manually and
+	// will not be updated automatically if the body is being modified
+	BodySize int
 }
 
 // ToRequestMeta converts a Request into a RequestMeta.

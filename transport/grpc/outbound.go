@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -32,6 +32,7 @@ import (
 	"go.uber.org/yarpc"
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/api/transport"
+	"go.uber.org/yarpc/api/x/introspection"
 	"go.uber.org/yarpc/internal/grpcerrorcodes"
 	intyarpcerrors "go.uber.org/yarpc/internal/yarpcerrors"
 	peerchooser "go.uber.org/yarpc/peer"
@@ -46,7 +47,11 @@ import (
 // http://www.grpc.io/docs/guides/wire.html#user-agents
 const UserAgent = "yarpc-go/" + yarpc.Version
 
-var _ transport.UnaryOutbound = (*Outbound)(nil)
+var (
+	_                         transport.UnaryOutbound              = (*Outbound)(nil)
+	_                         introspection.IntrospectableOutbound = (*Outbound)(nil)
+	invalidHeaderValueCharSet                                      = "\r\n" + string('\x00') // NUL
+)
 
 // Outbound is a transport.UnaryOutbound.
 type Outbound struct {
@@ -67,6 +72,12 @@ func newOutbound(t *Transport, peerChooser peer.Chooser, options ...OutboundOpti
 		peerChooser: peerChooser,
 		options:     newOutboundOptions(options),
 	}
+}
+
+// TransportName is the transport name that will be set on `transport.Request`
+// struct.
+func (o *Outbound) TransportName() string {
+	return TransportName
 }
 
 // Start implements transport.Lifecycle#Start.
@@ -99,6 +110,9 @@ func (o *Outbound) Call(ctx context.Context, request *transport.Request) (*trans
 	if request == nil {
 		return nil, yarpcerrors.InvalidArgumentErrorf("request for grpc outbound was nil")
 	}
+	if err := validateRequest(request); err != nil {
+		return nil, err
+	}
 	if err := o.once.WaitUntilRunning(ctx); err != nil {
 		return nil, intyarpcerrors.AnnotateWithInfo(yarpcerrors.FromError(err), "error waiting for grpc outbound to start for service: %s", request.Service)
 	}
@@ -113,10 +127,31 @@ func (o *Outbound) Call(ctx context.Context, request *transport.Request) (*trans
 		return nil, err
 	}
 	return &transport.Response{
-		Body:             ioutil.NopCloser(bytes.NewBuffer(responseBody)),
-		Headers:          responseHeaders,
-		ApplicationError: metadataToIsApplicationError(responseMD),
+		Body:                 ioutil.NopCloser(bytes.NewBuffer(responseBody)),
+		BodySize:             len(responseBody),
+		Headers:              responseHeaders,
+		ApplicationError:     metadataToIsApplicationError(responseMD),
+		ApplicationErrorMeta: metadataToApplicationErrorMeta(responseMD),
 	}, invokeErr
+}
+
+func validateRequest(req *transport.Request) error {
+	for _, v := range req.Headers.Items() {
+		// from https://httpwg.org/specs/rfc7540.html#rfc.section.10.3:
+		// HTTP/2 allows header field values that are not valid.
+		// While most of the values that can be encoded will not alter header field parsing,
+		// carriage return (CR, ASCII 0xd), line feed (LF, ASCII 0xa),
+		// and the zero character (NUL, ASCII 0x0) might be exploited
+		// by an attacker if they are translated verbatim.
+		// This should be done by grpc-go but the workaround in https://github.com/grpc/grpc-go/pull/610
+		// does not cover this case.
+		// This validation can be entirely removed if the https://github.com/grpc/grpc/issues/4672
+		// is solved properly.
+		if strings.ContainsAny(v, invalidHeaderValueCharSet) {
+			return yarpcerrors.InvalidArgumentErrorf("grpc request header value contains invalid characters including ASCII 0xd, 0xa, or 0x0")
+		}
+	}
+	return nil
 }
 
 func (o *Outbound) invoke(
@@ -159,7 +194,7 @@ func (o *Outbound) invoke(
 	tracer := o.t.options.tracer
 	createOpenTracingSpan := &transport.CreateOpenTracingSpan{
 		Tracer:        tracer,
-		TransportName: transportName,
+		TransportName: TransportName,
 		StartTime:     start,
 		ExtraTags:     yarpc.OpentracingTags,
 	}
@@ -259,6 +294,10 @@ func (o *Outbound) stream(
 		return nil, yarpcerrors.InvalidArgumentErrorf("stream request requires a request metadata")
 	}
 	treq := req.Meta.ToRequest()
+	if err := validateRequest(treq); err != nil {
+		return nil, err
+	}
+
 	md, err := transportRequestToMetadata(treq)
 	if err != nil {
 		return nil, err
@@ -273,20 +312,21 @@ func (o *Outbound) stream(
 	if err != nil {
 		return nil, err
 	}
-	defer func() { onFinish(err) }()
 
 	grpcPeer, ok := apiPeer.(*grpcPeer)
 	if !ok {
-		return nil, peer.ErrInvalidPeerConversion{
+		err := peer.ErrInvalidPeerConversion{
 			Peer:         apiPeer,
 			ExpectedType: "*grpcPeer",
 		}
+		onFinish(err)
+		return nil, err
 	}
 
 	tracer := o.t.options.tracer
 	createOpenTracingSpan := &transport.CreateOpenTracingSpan{
 		Tracer:        tracer,
-		TransportName: transportName,
+		TransportName: TransportName,
 		StartTime:     start,
 		ExtraTags:     yarpc.OpentracingTags,
 	}
@@ -294,6 +334,7 @@ func (o *Outbound) stream(
 
 	if err := tracer.Inject(span.Context(), opentracing.HTTPHeaders, mdReadWriter(md)); err != nil {
 		span.Finish()
+		onFinish(err)
 		return nil, err
 	}
 
@@ -308,15 +349,38 @@ func (o *Outbound) stream(
 	)
 	if err != nil {
 		span.Finish()
+		onFinish(err)
 		return nil, err
 	}
-	stream := newClientStream(streamCtx, req, clientStream, span)
+	stream := newClientStream(streamCtx, req, clientStream, span, onFinish)
 	tClientStream, err := transport.NewClientStream(stream)
 	if err != nil {
+		onFinish(err)
 		span.Finish()
 		return nil, err
 	}
 	return tClientStream, nil
+}
+
+// Introspect implements introspection.IntrospectableOutbound interface.
+func (o *Outbound) Introspect() introspection.OutboundStatus {
+	state := "Stopped"
+	if o.IsRunning() {
+		state = "Running"
+	}
+	var chooser introspection.ChooserStatus
+	if i, ok := o.peerChooser.(introspection.IntrospectableChooser); ok {
+		chooser = i.Introspect()
+	} else {
+		chooser = introspection.ChooserStatus{
+			Name: "Introspection not available",
+		}
+	}
+	return introspection.OutboundStatus{
+		Transport: TransportName,
+		State:     state,
+		Chooser:   chooser,
+	}
 }
 
 // Only does verification when there is a response service header key

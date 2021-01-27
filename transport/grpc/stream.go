@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -26,14 +26,19 @@ import (
 	"io"
 	"io/ioutil"
 
+	"github.com/gogo/status"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/atomic"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/internal/grpcerrorcodes"
 	"go.uber.org/yarpc/yarpcerrors"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/metadata"
+)
+
+var (
+	_ transport.StreamHeadersSender = (*serverStream)(nil)
+	_ transport.StreamHeadersReader = (*clientStream)(nil)
 )
 
 type serverStream struct {
@@ -73,23 +78,44 @@ func (ss *serverStream) ReceiveMessage(_ context.Context) (*transport.StreamMess
 	if err := ss.stream.RecvMsg(&msg); err != nil {
 		return nil, toYARPCStreamError(err)
 	}
-	return &transport.StreamMessage{Body: ioutil.NopCloser(bytes.NewReader(msg))}, nil
+	return &transport.StreamMessage{
+		Body:     readCloser{bytes.NewReader(msg)},
+		BodySize: len(msg),
+	}, nil
+}
+
+type readCloser struct {
+	*bytes.Reader
+}
+
+func (r readCloser) Close() error {
+	return nil
+}
+
+func (ss *serverStream) SendHeaders(headers transport.Headers) error {
+	md := make(metadata.MD, headers.Len())
+	for k, v := range headers.Items() {
+		md.Set(k, v)
+	}
+	return ss.stream.SendHeader(md)
 }
 
 type clientStream struct {
-	ctx    context.Context
-	req    *transport.StreamRequest
-	stream grpc.ClientStream
-	span   opentracing.Span
-	closed atomic.Bool
+	ctx     context.Context
+	req     *transport.StreamRequest
+	stream  grpc.ClientStream
+	span    opentracing.Span
+	closed  atomic.Bool
+	release func(error)
 }
 
-func newClientStream(ctx context.Context, req *transport.StreamRequest, stream grpc.ClientStream, span opentracing.Span) *clientStream {
+func newClientStream(ctx context.Context, req *transport.StreamRequest, stream grpc.ClientStream, span opentracing.Span, release func(error)) *clientStream {
 	return &clientStream{
-		ctx:    ctx,
-		req:    req,
-		stream: stream,
-		span:   span,
+		ctx:     ctx,
+		req:     req,
+		stream:  stream,
+		span:    span,
+		release: release,
 	}
 }
 
@@ -132,10 +158,25 @@ func (cs *clientStream) Close(context.Context) error {
 	return cs.stream.CloseSend()
 }
 
+func (cs *clientStream) Headers() (transport.Headers, error) {
+	md, err := cs.stream.Header()
+	if err != nil {
+		return transport.NewHeaders(), err
+	}
+	headers := transport.NewHeadersWithCapacity(len(md))
+	for k, vs := range md {
+		if len(vs) > 0 {
+			headers = headers.With(k, vs[0])
+		}
+	}
+	return headers, nil
+}
+
 func (cs *clientStream) closeWithErr(err error) error {
 	if !cs.closed.Swap(true) {
 		err = transport.UpdateSpanWithErr(cs.span, err)
 		cs.span.Finish()
+		cs.release(err)
 	}
 	return err
 }
@@ -159,26 +200,13 @@ func toYARPCStreamError(err error) error {
 	if !ok {
 		code = yarpcerrors.CodeUnknown
 	}
-	return yarpcerrors.Newf(code, status.Message())
-}
-
-func toGRPCStreamError(err error) error {
-	if err == nil {
-		return nil
+	yarpcerr := yarpcerrors.Newf(code, status.Message())
+	details, err := marshalError(status)
+	if err != nil {
+		return yarpcerrors.FromError(err)
 	}
-
-	// if this is not a yarpc error, return the error
-	// this will result in the error being a grpc-go error with codes.Unknown
-	if !yarpcerrors.IsStatus(err) {
-		return err
+	if details != nil {
+		yarpcerr = yarpcerr.WithDetails(details)
 	}
-	// we now know we have a yarpc error
-	yarpcStatus := yarpcerrors.FromError(err)
-	message := yarpcStatus.Message()
-	grpcCode, ok := grpcerrorcodes.YARPCCodeToGRPCCode[yarpcStatus.Code()]
-	// should only happen if grpcerrorcodes.YARPCCodeToGRPCCode does not cover all codes
-	if !ok {
-		grpcCode = codes.Unknown
-	}
-	return status.Error(grpcCode, message)
+	return yarpcerr
 }

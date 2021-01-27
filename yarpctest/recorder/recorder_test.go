@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -202,7 +202,7 @@ func withDisconnectedClient(t *testing.T, recorder *Recorder, f func(raw.Client)
 
 func withConnectedClient(t *testing.T, recorder *Recorder, f func(raw.Client)) {
 	httpTransport := http.NewTransport()
-	serverHTTP := httpTransport.NewInbound(":0")
+	serverHTTP := httpTransport.NewInbound("127.0.0.1:0")
 	serverDisp := yarpc.NewDispatcher(yarpc.Config{
 		Name:     "server",
 		Inbounds: yarpc.Inbounds{serverHTTP},

@@ -1,4 +1,4 @@
-// Copyright (c) 2019 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,8 @@
 package protobuf
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gogo/googleapis/google/rpc"
@@ -30,6 +32,15 @@ import (
 	"go.uber.org/yarpc/internal/grpcerrorcodes"
 	"go.uber.org/yarpc/yarpcerrors"
 )
+
+const (
+	// format for converting error details to string
+	_errDetailsFmt = "[]{ %s }"
+	// format for converting a single message to string
+	_errDetailFmt = "%s{%s}"
+)
+
+var _ error = (*pberror)(nil)
 
 type pberror struct {
 	code    yarpcerrors.Code
@@ -70,6 +81,8 @@ func NewError(code yarpcerrors.Code, message string, options ...ErrorOption) err
 
 // GetErrorDetails returns the error details of the error.
 //
+// This method supports extracting details from wrapped errors.
+//
 // Each element in the returned slice of interface{} is either a proto.Message
 // or an error to explain why the element is not a proto.Message, most likely
 // because the error detail could not be unmarshaled.
@@ -78,9 +91,9 @@ func GetErrorDetails(err error) []interface{} {
 	if err == nil {
 		return nil
 	}
-
-	if pberr, ok := err.(*pberror); ok {
-		return pberr.details
+	var target *pberror
+	if errors.As(err, &target) {
+		return target.details
 	}
 	return nil
 }
@@ -98,32 +111,86 @@ func WithErrorDetails(details ...proto.Message) ErrorOption {
 }
 
 // convertToYARPCError is to be used for handling errors on the inbound side.
-func convertToYARPCError(encoding transport.Encoding, err error, codec *codec) error {
+func convertToYARPCError(encoding transport.Encoding, err error, codec *codec, resw transport.ResponseWriter) error {
 	if err == nil {
 		return nil
 	}
-	if pberr, ok := err.(*pberror); ok {
-		// We only use this function on the inbound side, and pberrors should be
-		// constructed using the constructor above, so we can safely assume all
-		// the details are proto.Message-typed.
-		var details []proto.Message
-		for _, detail := range pberr.details {
-			details = append(details, detail.(proto.Message))
+	var pberr *pberror
+	if errors.As(err, &pberr) {
+		setApplicationErrorMeta(pberr, resw)
+		status, sterr := createStatusWithDetail(pberr, encoding, codec)
+		if sterr != nil {
+			return sterr
 		}
-		st, convertErr := status.New(grpcerrorcodes.YARPCCodeToGRPCCode[pberr.code], pberr.message).WithDetails(details...)
-		if convertErr != nil {
-			return convertErr
-		}
-		detailsBytes, cleanup, marshalErr := marshal(encoding, st.Proto(), codec)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		defer cleanup()
-		yarpcDet := make([]byte, len(detailsBytes))
-		copy(yarpcDet, detailsBytes)
-		return yarpcerrors.Newf(pberr.code, pberr.message).WithDetails(yarpcDet)
+		return status
 	}
 	return err
+}
+
+func createStatusWithDetail(pberr *pberror, encoding transport.Encoding, codec *codec) (*yarpcerrors.Status, error) {
+	details := make([]proto.Message, 0, len(pberr.details))
+	for _, detail := range pberr.details {
+		if pbdetail, ok := detail.(proto.Message); ok {
+			details = append(details, pbdetail)
+		} else {
+			return nil, errors.New("proto error detail is not proto.Message compatible")
+		}
+	}
+
+	st, convertErr := status.New(grpcerrorcodes.YARPCCodeToGRPCCode[pberr.code], pberr.message).WithDetails(details...)
+	if convertErr != nil {
+		return nil, convertErr
+	}
+	detailsBytes, cleanup, marshalErr := marshal(encoding, st.Proto(), codec)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	defer cleanup()
+	yarpcDet := make([]byte, len(detailsBytes))
+	copy(yarpcDet, detailsBytes)
+	return yarpcerrors.Newf(pberr.code, pberr.message).WithDetails(yarpcDet), nil
+}
+
+func setApplicationErrorMeta(pberr *pberror, resw transport.ResponseWriter) {
+	applicationErroMetaSetter, ok := resw.(transport.ApplicationErrorMetaSetter)
+	if !ok {
+		return
+	}
+
+	var appErrName string
+	if len(pberr.details) > 0 { // only grab the first name since this will be emitted with metrics
+		appErrName = messageNameWithoutPackage(proto.MessageName(
+			pberr.details[0].(proto.Message)),
+		)
+	}
+
+	details := make([]string, 0, len(pberr.details))
+	for _, detail := range pberr.details {
+		details = append(details, protobufMessageToString(detail.(proto.Message)))
+	}
+
+	applicationErroMetaSetter.SetApplicationErrorMeta(&transport.ApplicationErrorMeta{
+		Name:    appErrName,
+		Details: fmt.Sprintf(_errDetailsFmt, strings.Join(details, " , ")),
+	})
+}
+
+// messageNameWithoutPackage strips the package name, returning just the type
+// name.
+//
+// For example:
+//  uber.foo.bar.TypeName -> TypeName
+func messageNameWithoutPackage(messageName string) string {
+	if i := strings.LastIndex(messageName, "."); i >= 0 {
+		return messageName[i+1:]
+	}
+	return messageName
+}
+
+func protobufMessageToString(message proto.Message) string {
+	return fmt.Sprintf(_errDetailFmt,
+		messageNameWithoutPackage(proto.MessageName(message)),
+		proto.CompactTextString(message))
 }
 
 // convertFromYARPCError is to be used for handling errors on the outbound side.
@@ -157,5 +224,9 @@ func (err *pberror) YARPCError() *yarpcerrors.Status {
 	if err == nil {
 		return nil
 	}
-	return yarpcerrors.Newf(err.code, err.message)
+	status, statusErr := createStatusWithDetail(err, Encoding, newCodec(nil))
+	if statusErr != nil {
+		return yarpcerrors.FromError(statusErr)
+	}
+	return status
 }
