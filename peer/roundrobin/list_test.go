@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -36,7 +36,7 @@ import (
 	"go.uber.org/yarpc/api/peer"
 	. "go.uber.org/yarpc/api/peer/peertest"
 	"go.uber.org/yarpc/api/transport"
-	"go.uber.org/yarpc/internal/introspection"
+	"go.uber.org/yarpc/api/x/introspection"
 	"go.uber.org/yarpc/internal/testtime"
 	"go.uber.org/yarpc/internal/whitespace"
 	"go.uber.org/yarpc/peer/abstractpeer"
@@ -48,18 +48,10 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
-var (
-	_noContextDeadlineError = yarpcerrors.Newf(yarpcerrors.CodeInvalidArgument, `"round-robin" peer list can't wait for peer without a context deadline`)
-	_notRunningErrorFormat  = `"round-robin" peer list is not running: %s`
-	_unavailableErrorFormat = `"round-robin" peer list timed out waiting for peer: %s`
-)
+var _notRunningErrorFormat = `"round-robin" peer list is not running: %s`
 
 func newNotRunningError(err string) error {
 	return yarpcerrors.FailedPreconditionErrorf(_notRunningErrorFormat, err)
-}
-
-func newUnavailableError(err error) error {
-	return yarpcerrors.UnavailableErrorf(_unavailableErrorFormat, err.Error())
 }
 
 func TestRoundRobinList(t *testing.T) {
@@ -309,7 +301,7 @@ func TestRoundRobinList(t *testing.T) {
 				StartAction{},
 				ChooseAction{
 					InputContextTimeout: 20 * time.Millisecond,
-					ExpectedErr:         newUnavailableError(context.DeadlineExceeded),
+					ExpectedErrMsg:      "peer list has no peers",
 				},
 			},
 			expectedRunning: true,
@@ -516,7 +508,7 @@ func TestRoundRobinList(t *testing.T) {
 					Actions: []PeerListAction{
 						ChooseAction{
 							InputContextTimeout: 10 * time.Millisecond,
-							ExpectedErr:         newUnavailableError(context.DeadlineExceeded),
+							ExpectedErrMsg:      "peer list has no peers",
 						},
 						UpdateAction{AddedPeerIDs: []string{"1"}},
 					},
@@ -551,17 +543,6 @@ func TestRoundRobinList(t *testing.T) {
 		// 	expectedRunning: true,
 		// },
 		{
-			msg: "no blocking with no context deadline",
-			peerListActions: []PeerListAction{
-				StartAction{},
-				ChooseAction{
-					InputContext: context.Background(),
-					ExpectedErr:  _noContextDeadlineError,
-				},
-			},
-			expectedRunning: true,
-		},
-		{
 			msg:                        "add unavailable peer",
 			retainedAvailablePeerIDs:   []string{"1"},
 			retainedUnavailablePeerIDs: []string{"2"},
@@ -586,7 +567,7 @@ func TestRoundRobinList(t *testing.T) {
 				UpdateAction{RemovedPeerIDs: []string{"1"}},
 				ChooseAction{
 					InputContextTimeout: 10 * time.Millisecond,
-					ExpectedErr:         newUnavailableError(context.DeadlineExceeded),
+					ExpectedErrMsg:      "has no peers",
 				},
 			},
 			expectedRunning: true,
@@ -600,7 +581,7 @@ func TestRoundRobinList(t *testing.T) {
 				UpdateAction{AddedPeerIDs: []string{"1"}},
 				ChooseAction{
 					InputContextTimeout: 10 * time.Millisecond,
-					ExpectedErr:         newUnavailableError(context.DeadlineExceeded),
+					ExpectedErrMsg:      "has 1 peer but it is not responsive",
 				},
 				NotifyStatusChangeAction{PeerID: "1", NewConnectionStatus: peer.Available},
 				ChooseAction{ExpectedPeer: "1"},
@@ -631,7 +612,7 @@ func TestRoundRobinList(t *testing.T) {
 				NotifyStatusChangeAction{PeerID: "1", NewConnectionStatus: peer.Unavailable},
 				ChooseAction{
 					InputContextTimeout: 10 * time.Millisecond,
-					ExpectedErr:         newUnavailableError(context.DeadlineExceeded),
+					ExpectedErrMsg:      "has 1 peer but it is not responsive",
 				},
 			},
 			expectedRunning: true,
@@ -646,7 +627,7 @@ func TestRoundRobinList(t *testing.T) {
 				NotifyStatusChangeAction{PeerID: "1", NewConnectionStatus: peer.Unavailable},
 				ChooseAction{
 					InputContextTimeout: 10 * time.Millisecond,
-					ExpectedErr:         newUnavailableError(context.DeadlineExceeded),
+					ExpectedErrMsg:      "has 1 peer but it is not responsive",
 				},
 			},
 			expectedRunning: true,
@@ -1042,5 +1023,5 @@ func TestFailFastConfig(t *testing.T) {
 		Body:      strings.NewReader("nada"),
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no peer available")
+	assert.Contains(t, err.Error(), "has 1 peer but it is not responsive")
 }

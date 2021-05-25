@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +46,7 @@ func TestInboundCallReadFromRequest(t *testing.T) {
 		ShardKey:        "shardKey",
 		RoutingKey:      "routingKey",
 		RoutingDelegate: "routingDelegate",
+		CallerProcedure: "callerProcedure",
 	})
 	require.NoError(t, err)
 
@@ -57,7 +58,7 @@ func TestInboundCallReadFromRequest(t *testing.T) {
 	assert.Equal(t, "shardKey", call.ShardKey())
 	assert.Equal(t, "routingKey", call.RoutingKey())
 	assert.Equal(t, "routingDelegate", call.RoutingDelegate())
-
+	assert.Equal(t, "callerProcedure", call.CallerProcedure())
 	assert.Equal(t, "World", call.Header("Hello"))
 	assert.Equal(t, "bar", call.Header("FOO"))
 	assert.Equal(t, "true", call.Header("success"))

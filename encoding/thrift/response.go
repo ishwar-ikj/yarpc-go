@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,11 +20,18 @@
 
 package thrift
 
-import "go.uber.org/thriftrw/envelope"
+import (
+	"go.uber.org/thriftrw/envelope"
+	"go.uber.org/yarpc/yarpcerrors"
+)
 
 // Response contains the raw response from a generated Thrift handler.
 type Response struct {
 	Body envelope.Enveloper
 
 	IsApplicationError bool
+
+	ApplicationErrorDetails string
+	ApplicationErrorName    string
+	ApplicationErrorCode    *yarpcerrors.Code
 }

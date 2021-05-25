@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,7 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/peer/abstractpeer"
+	"go.uber.org/zap"
 )
 
 type httpPeer struct {
@@ -76,6 +77,13 @@ func (p *httpPeer) isAvailable() bool {
 	if conn != nil && err == nil {
 		return true
 	}
+
+	p.transport.logger.Debug(
+		"unable to connect to peer, marking as unavailable",
+		zap.String("peer", p.addr),
+		zap.String("transport", "http"),
+	)
+
 	return false
 }
 
@@ -114,6 +122,14 @@ func (p *httpPeer) onSuspect() {
 	// window to relatively similar distant times.
 	innocentDurationUnixNano := p.transport.jitter(p.transport.innocenceWindow.Nanoseconds())
 	p.innocentUntilUnixNano.Store(now + innocentDurationUnixNano)
+
+	p.transport.logger.Debug(
+		"peer marked suspicious due to timeout",
+		zap.String("peer", p.addr),
+		zap.Duration("duration", time.Duration(innocentDurationUnixNano)),
+		zap.Time("until", time.Unix(0, innocentDurationUnixNano)),
+		zap.String("transport", "http"),
+	)
 
 	p.notifyStatusChanged()
 }
@@ -154,7 +170,16 @@ func (p *httpPeer) MaintainConn() {
 		} else {
 			p.setStatus(peer.Unavailable)
 			// Back-off on fail
-			if !p.sleep(backoff.Duration(attempts)) {
+			dur := backoff.Duration(attempts)
+			p.transport.logger.Debug(
+				"peer connect retry back-off",
+				zap.String("peer", p.addr),
+				zap.Duration("sleep", dur),
+				zap.Time("until", time.Now().Add(dur)),
+				zap.Int("attempt", int(attempts)),
+				zap.String("transport", "http"),
+			)
+			if !p.sleep(dur) {
 				break
 			}
 			attempts++
@@ -167,6 +192,12 @@ func (p *httpPeer) MaintainConn() {
 }
 
 func (p *httpPeer) setStatus(status peer.ConnectionStatus) {
+	p.transport.logger.Debug(
+		"peer status change",
+		zap.String("status", status.String()),
+		zap.String("peer", p.Peer.Identifier()),
+		zap.String("transport", "http"),
+	)
 	p.Peer.SetStatus(status)
 	p.Peer.NotifyStatusChanged()
 }

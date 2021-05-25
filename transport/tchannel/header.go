@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -41,13 +41,25 @@ const (
 	ErrorMessageHeaderKey = "$rpc$-error-message"
 	// ServiceHeaderKey is the response header key for the respond service
 	ServiceHeaderKey = "$rpc$-service"
+	// ApplicationErrorNameHeaderKey is the response header key for the application error name.
+	ApplicationErrorNameHeaderKey = "$rpc$-application-error-name"
+	// ApplicationErrorDetailsHeaderKey is the response header key for the
+	// application error details string.
+	ApplicationErrorDetailsHeaderKey = "$rpc$-application-error-details"
+	// ApplicationErrorCodeHeaderKey is the response header key for the application error code.
+	ApplicationErrorCodeHeaderKey = "$rpc$-application-error-code"
+	// CallerProcedureHeader is the header key for the procedure of the caller making the request.
+	CallerProcedureHeader = "$rpc$-caller-procedure"
 )
 
 var _reservedHeaderKeys = map[string]struct{}{
-	ErrorCodeHeaderKey:    {},
-	ErrorNameHeaderKey:    {},
-	ErrorMessageHeaderKey: {},
-	ServiceHeaderKey:      {},
+	ErrorCodeHeaderKey:               {},
+	ErrorNameHeaderKey:               {},
+	ErrorMessageHeaderKey:            {},
+	ServiceHeaderKey:                 {},
+	ApplicationErrorNameHeaderKey:    {},
+	ApplicationErrorDetailsHeaderKey: {},
+	ApplicationErrorCodeHeaderKey:    {},
 }
 
 func isReservedHeaderKey(key string) bool {
@@ -157,6 +169,30 @@ func decodeHeaders(r io.Reader) (transport.Headers, error) {
 	}
 
 	return headers, reader.Err()
+}
+
+// headerCallerProcedureToRequest copies callerProcedure from headers to req.CallerProcedure
+// and then deletes it from headers.
+func headerCallerProcedureToRequest(req *transport.Request, headers *transport.Headers) *transport.Request {
+	if callerProcedure, ok := headers.Get(CallerProcedureHeader); ok {
+		req.CallerProcedure = callerProcedure
+		headers.Del(CallerProcedureHeader)
+		return req
+	}
+	return req
+}
+
+// requestCallerProcedureToHeader add callerProcedure header as an application header.
+func requestCallerProcedureToHeader(req *transport.Request, reqHeaders map[string]string) map[string]string {
+	if req.CallerProcedure == "" {
+		return reqHeaders
+	}
+
+	if reqHeaders == nil {
+		reqHeaders = make(map[string]string)
+	}
+	reqHeaders[CallerProcedureHeader] = req.CallerProcedure
+	return reqHeaders
 }
 
 // encodeHeaders encodes headers using the format:

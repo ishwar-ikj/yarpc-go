@@ -5,6 +5,201 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- observability: extend response, and request payload size histogram buckets up to 256MB.
+### Fixed
+- introspection: wrong display of proto procedure name.
+- error details: propagation of protobuf error details did not work if the any message was not
+  registered in the gogo proto registry.
+
+## [1.53.2] - 2021-04-16
+### Removed
+- Disable `rpc-caller-procedure` header temporarily by stopping the `CallerProcedure` propagation.
+### Added
+- gRPC: log header values upon validation error
+
+## [1.53.1] - 2021-03-30
+- v1.53.1 is v1.52.0. v1.53.0 has a backward compatible issue with the new header
+  `rpc-caller-procedure` added in v1.53.0.
+
+## [1.53.0] - 2021-03-12
+### Added
+- gRPC: accept keepalive parameters for gRPC outbound configuration.
+- observability: deprecation of logging levels `applicationError` and `serverError` in favor
+  of `serverError` and `clientError`.
+- The `transport.Request` provides a new field `CallerProcedure`. A header `rpc-caller-procedure`
+  is also propagated for outbound calls. This field represents the origin procedure where the
+  requests was sent.
+### Fixed
+- peer: concurrency issue when using `rand` for the peer strategies `randpeer` and `tworandomchoices`
+
+## [1.52.0] - 2021-02-12
+### Added
+- gRPC: accept keepalive parameters for the outbound gRPC connection.
+- observability: panic metrics are now also reported for these type of requests:
+  - inbound oneway
+  - outbound stream
+  - outbound oneway
+  - outbound unary
+
+## [1.51.0] - 2021-02-04
+### Added
+- observability: Add metric tags blocklist configuration. Allows to stub high cardinality tags emitted
+  in the observability middleware
+
+## [1.50.0] - 2021-01-22
+### Added
+- gRPC: accept dialer options in gRPC transportSpec config
+
+### Fixed
+- Http: fix memory and connection leak in http outbound call handler
+- Observability: error code CodeUnimplemented will be marked as an `application_error`
+- peer: the peer implementations provided by yarpc (hashring32, pendingheap,
+  randpeer, roundrobin, tworandomchoices) are thread-safe now
+
+## [1.49.1] - 2020-11-17
+### Fixed
+- proto: pass protobuf error details in gRPC streams
+- proto: pass error details on proto-error to yarpcerror conversion
+
+## [1.49.0] - 2020-10-22
+### Added
+- observability: Add request and response payload size histogram
+- api: expose `BodySize` field in the transport request/response, middleware can use
+  this field to get or update the request/response body size
+- hashring32: new option OffsetGeneratorValue
+### Fixed
+- yarpc: service name can contain `_` now.
+
+## [1.48.0] - 2020-10-07
+### Added
+- peer/hashring32: Support using an application header as the shard key, instead
+  of `transport.Request#ShardKey`
+- peer/hashring32: options NumReplicas and NumPeersEstimate are not private
+  anymore and can be used by consumer of the pkg.
+- observability: Add caller request TTL histogram in inbound middleware
+
+
+## [1.47.2] - 2020-09-16
+### Fixed
+- errors returned by `yarpcerrors.FromError` now behave properly when using
+  `errors.Is` and `errors.Unwrap`.
+- thrift plugin: `types_yarpc.go` file, which contains exception annotations is
+  always generated.
+- thrift plugin: `types_yarpc.go` recognizes case-sensitive Thrift file names
+  for generating correct Go package name.
+
+## [1.47.1] - 2020-09-02
+### Removed
+- Reverted `go.mod` Go version from 1.14 to 1.13.
+
+## [1.47.0] - 2020-08-31
+### Added
+- gRPC Streaming: Added the ability to send and read stream response headers.
+- thrift: Using the `rpc.code` annotation, services may specify an associated
+  error code for Thrift exceptions. Metrics will classify the exception as a
+  client or server failure like a `yarpcerrors` error. If a Thrift exception is
+  not annotated with a code, it will continue to be classified as a client
+  failure.
+- logging: Errors and annotated Thrift exceptions are logged with their error
+  code under the `errorCode` field. Errors created outside of
+  `protobuf.NewError` and `yarpcerrors` will yield `CodeUnknown`.
+- logging: Thrift exceptions and Protobuf error details are logged under the
+  `errorDetails` field.
+- grpc: Enabled outbound introspection for debug pages.
+- experimental: Added `tchannel.GetResponseErrorMeta` API for retrieving native
+  TChannel error response codes.
+### Fixed
+- tchannel: middleware may modify the outbound `transport.Request#Caller` field,
+  similar to gRPC and HTTP outbounds.
+- Added `github.com/dgryski/go-farm` dependency to `glide.yaml` for legacy
+  projects.
+### Removed
+- Removed `yarpcproto` package that enabled "oneway" Protobuf signatures.
+
+## [1.46.0] - 2020-05-20
+### Added
+- peer lists accepts a `DefaultChooseTimeout` configuration for applying to
+  `context`s without deadlines.
+- gRPC-go version is added to debug pages.
+### Changed
+- observability: if a context deadline exceeded (timeout) or context cancelled
+  error is observed, handler responses (success and errors) are replaced by the
+  context error. Dropped responses are logged under the `dropped` field.
+- Introspection APIs are added to `api/x/introspection`. This enabling custom
+  outbounds, inbounds and peer lists to use YARPC's existing `x/debug` page.
+- Introduced `api/x/restriction` for preventing unwanted transport-encoding
+  combinations. This may cause panics for existing Fx services on start-up.
+### Fixed
+- yarpcerrors: `fmt` verbs are ignored when no args are passed to error
+  constructors.
+- Fix gRPC streaming when used with the direct peer chooser.
+- Streaming calls do not require contexts with deadlines. Users should use
+  cancelable contexts for long-lived streams instead of timeouts.
+- Outbound status on debug pages is ordered by outbound name.
+## Removed
+- The `x/yarpcmeta` package is completely removed.
+- tchannel: dropped "handler failed" log. Context error override change makes
+  this log redundant as richer information exists in observability logs.
+- tchannel: when callers time out, TChannel servers will not log
+  "SendSystemError failed" and "responseWriter failed to close" messages, since
+  they are unactionable.
+
+## [1.45.0] - 2020-04-21
+### Added
+- gRPC inbound supports introspection, suitable for debug pages.
+- yarpctest: Add `ContextWithCall` function to ease testing of functions that
+  use `yarpc.CallFromContext`.
+- `yarpcerrors` are aligned with the `errors` API introduced in Go 1.13
+  (https://blog.golang.org/go1.13-errors). `yarpcerrors.IsStatus`,
+  `yarpcerrors.FromError`, support wrapped errors, and `yarpcerrors.Status`
+  implements `Unwrap() error`.
+### Changed
+- Inbound Thrift requests that fail during `wire.Value#FromWire` are returned as
+  `yarpcerrors.CodeInvalidArgument`, to indicate a client error.
+- Dropped library dependency on development tools.
+### Fixed
+- gRPC inbounds correctly convert all YARPC error codes to gRPC error codes,
+  outside of handler errors. Previously, well-defined YARPC errors were wrapped
+  with an `Unknown` gRPC code for unimplemented procedures.
+- Fixes `idleConnTimeout` not propgated to the underlying http transport.
+- HTTP does not hold onto connections forever by default. `IdleConnTimeout`
+  now defaults to 15 minutes.
+- `protobuf.GetErrorDetails` can extract error details from wrapped errors.
+- observability: errors returned from Protobuf handlers are logged with their
+  error message instead of `application_error`.
+- `encoding/protobuf` error details (`yarpcerrors.Status` with details) are
+  logged at application error log level. This matches behavior with Thrift
+  exceptions.
+
+## [1.44.0] - 2020-02-27
+### Added
+- The TChannel Transport now supports a custom dialer function option.
+
+## [1.43.0] - 2020-02-25
+### Added
+- gRPC now supports compression.
+  The packages `compressor/gzip` and `compressor/snappy` provide
+  compressors accepted by the gRPC `Compressor` dialer option.
+- The `peer/hashring32` package now provides support for consistent hashing
+  that is compatible with RingPop hash ring topologies.
+  This peer selection strategy uses the `ShardKey` call option to
+  pin traffic to an arbitrary peer that is relatively stable as the peer list
+  membership changes.
+- Observability middleware now emits metrics for panics that occur on the stack
+  of an inbound call handler.
+- The `transporttest` package now provides a `Pipe` constructor, which creates
+  a bound pair of transport layer streams, for testing streaming protocols like
+  gRPC.
+- The `yarpctest.FakeOutbound` can now send requests to a `transport.Router`.
+  This allows end to end testing with a client and server in memory.
+  The `OutboundCallOverride`, `OutboundCallOnewayOverride` (new), and
+  `OutboundCallStreamOverride` (new) are now a complete set that allow tests to
+  hook any of the call behaviors.
+- All outbounds now implement `TransportName` and a new `transport.Namer`
+  interface.
+  This will allow outbound observability middleware to carry the transport name
+  in metrics properly.
 ### Changed
 - This change reduces the API surface of the peer list implementations to
   remove a previously public embedded type and replace it with implementations
@@ -13,6 +208,14 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
   concrete types.
   However, we expect that in practice, peer lists are used as either peer.List,
   peer.Chooser, or for the private introspection interface.
+- Peer list peer unavailability errors now provide additional context including
+  the number of assigned peers and whether fail-fast is enabled.
+### Fixed
+- Fixed Streaming Protobuf-flavored-JSON nil pointer panic.
+- Log entries for EOF stream messages are now considered successes to avoid
+  setting off false alarms.
+  The successful log entries still carry the "error" field, which will reflect
+  the EOF error.
 
 ## [1.42.1] - 2019-11-27 (Gobble)
 ### Fixed
@@ -1154,7 +1357,23 @@ This release requires regeneration of ThriftRW code.
 
 - Initial release.
 
-[Unreleased]: https://github.com/yarpc/yarpc-go/compare/v1.42.1...HEAD
+[Unreleased]: https://github.com/yarpc/yarpc-go/compare/v1.53.2...HEAD
+[1.53.2]: https://github.com/yarpc/yarpc-go/compare/v1.53.1...v1.53.2
+[1.53.1]: https://github.com/yarpc/yarpc-go/compare/v1.51.0...v1.52.0
+[1.53.0]: https://github.com/yarpc/yarpc-go/compare/v1.52.0...v1.53.0
+[1.52.0]: https://github.com/yarpc/yarpc-go/compare/v1.51.0...v1.52.0
+[1.51.0]: https://github.com/yarpc/yarpc-go/compare/v1.50.0...v1.51.0
+[1.50.0]: https://github.com/yarpc/yarpc-go/compare/v1.49.1...v1.50.0
+[1.49.1]: https://github.com/yarpc/yarpc-go/compare/v1.49.0...v1.49.1
+[1.49.0]: https://github.com/yarpc/yarpc-go/compare/v1.48.0...v1.49.0
+[1.48.0]: https://github.com/yarpc/yarpc-go/compare/v1.47.2...v1.48.0
+[1.47.2]: https://github.com/yarpc/yarpc-go/compare/v1.47.1...v1.47.2
+[1.47.1]: https://github.com/yarpc/yarpc-go/compare/v1.47.0...v1.47.1
+[1.47.0]: https://github.com/yarpc/yarpc-go/compare/v1.46.0...v1.47.0
+[1.46.0]: https://github.com/yarpc/yarpc-go/compare/v1.45.0...v1.46.0
+[1.45.0]: https://github.com/yarpc/yarpc-go/compare/v1.44.0...v1.45.0
+[1.44.0]: https://github.com/yarpc/yarpc-go/compare/v1.43.0...v1.44.0
+[1.43.0]: https://github.com/yarpc/yarpc-go/compare/v1.42.1...v1.43.0
 [1.42.1]: https://github.com/yarpc/yarpc-go/compare/v1.42.0...v1.42.1
 [1.42.0]: https://github.com/yarpc/yarpc-go/compare/v1.41.0...v1.42.0
 [1.41.0]: https://github.com/yarpc/yarpc-go/compare/v1.40.0...v1.41.0

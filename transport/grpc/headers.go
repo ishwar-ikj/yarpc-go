@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -34,6 +34,10 @@ const (
 	// request. This corresponds to the Request.Caller attribute.
 	// This header is required.
 	CallerHeader = "rpc-caller"
+	// CallerProcedureHeader is the header key for the name of the rpc procedure from the service sending the
+	// request. This corresponds to the Request.CallerProcedure attribute.
+	// This header is optional.
+	CallerProcedureHeader = "rpc-caller-procedure"
 	// ServiceHeader is the header key for the name of the service to which
 	// the request is being sent. This corresponds to the Request.Service attribute.
 	// This header is also used in responses to ensure requests are processed by the
@@ -66,6 +70,13 @@ const (
 	// if there was an application error.
 	ApplicationErrorHeader = "rpc-application-error"
 
+	// _applicationErrorNameHeader is the header for the name of the application
+	// error.
+	_applicationErrorNameHeader = "rpc-application-error-name"
+	// _applicationErrorDetailsHeader is the header for the the application error
+	// meta details string.
+	_applicationErrorDetailsHeader = "rpc-application-error-details"
+
 	// ApplicationErrorHeaderValue is the value that will be set for
 	// ApplicationErrorHeader is there was an application error.
 	//
@@ -96,6 +107,7 @@ func transportRequestToMetadata(request *transport.Request) (metadata.MD, error)
 		addToMetadata(md, RoutingKeyHeader, request.RoutingKey),
 		addToMetadata(md, RoutingDelegateHeader, request.RoutingDelegate),
 		addToMetadata(md, EncodingHeader, string(request.Encoding)),
+		addToMetadata(md, CallerProcedureHeader, request.CallerProcedure),
 	); err != nil {
 		return md, err
 	}
@@ -116,7 +128,7 @@ func metadataToTransportRequest(md metadata.MD) (*transport.Request, error) {
 		case 1:
 			value = values[0]
 		default:
-			return nil, yarpcerrors.InvalidArgumentErrorf("header has more than one value: %s", header)
+			return nil, yarpcerrors.InvalidArgumentErrorf("header has more than one value: %s:%v", header, values)
 		}
 		header = transport.CanonicalizeHeaderKey(header)
 		switch header {
@@ -132,6 +144,8 @@ func metadataToTransportRequest(md metadata.MD) (*transport.Request, error) {
 			request.RoutingDelegate = value
 		case EncodingHeader:
 			request.Encoding = transport.Encoding(value)
+		case CallerProcedureHeader:
+			request.CallerProcedure = value
 		case contentTypeHeader:
 			// if request.Encoding was set, do not parse content-type
 			// this results in EncodingHeader overriding content-type
@@ -143,6 +157,28 @@ func metadataToTransportRequest(md metadata.MD) (*transport.Request, error) {
 		}
 	}
 	return request, nil
+}
+
+func metadataToApplicationErrorMeta(responseMD metadata.MD) *transport.ApplicationErrorMeta {
+	if responseMD == nil {
+		return nil
+	}
+
+	var details, name string
+	if header := responseMD[_applicationErrorDetailsHeader]; len(header) == 1 {
+		details = header[0]
+	}
+	if header := responseMD[_applicationErrorNameHeader]; len(header) == 1 {
+		name = header[0]
+	}
+
+	return &transport.ApplicationErrorMeta{
+		Details: details,
+		Name:    name,
+		// ignore Code, this should be derived from the error since codes are
+		// natively supported in gRPC and YARPC
+		Code: nil,
+	}
 }
 
 // addApplicationHeaders adds the headers to md.
@@ -177,7 +213,7 @@ func getApplicationHeaders(md metadata.MD) (transport.Headers, error) {
 		case 1:
 			value = values[0]
 		default:
-			return headers, yarpcerrors.InvalidArgumentErrorf("header has more than one value: %s", header)
+			return headers, yarpcerrors.InvalidArgumentErrorf("header has more than one value: %s:%v", header, values)
 		}
 		headers = headers.With(header, value)
 	}

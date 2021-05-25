@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +29,7 @@ import (
 
 	"go.uber.org/multierr"
 	"go.uber.org/yarpc"
+	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/internal/config"
 	"go.uber.org/yarpc/internal/interpolate"
 	"gopkg.in/yaml.v2"
@@ -45,6 +46,7 @@ type Configurator struct {
 	knownPeerChoosers     map[string]*compiledPeerChooserSpec
 	knownPeerLists        map[string]*compiledPeerListSpec
 	knownPeerListUpdaters map[string]*compiledPeerListUpdaterSpec
+	knownCompressors      map[string]transport.Compressor
 	resolver              interpolate.VariableResolver
 }
 
@@ -56,6 +58,7 @@ func New(opts ...Option) *Configurator {
 		knownPeerChoosers:     make(map[string]*compiledPeerChooserSpec),
 		knownPeerLists:        make(map[string]*compiledPeerListSpec),
 		knownPeerListUpdaters: make(map[string]*compiledPeerListUpdaterSpec),
+		knownCompressors:      make(map[string]transport.Compressor),
 		resolver:              os.LookupEnv,
 	}
 
@@ -204,6 +207,23 @@ func (c *Configurator) MustRegisterPeerListUpdater(s PeerListUpdaterSpec) {
 	}
 }
 
+// RegisterCompressor registers the given Compressor for the configurator, so
+// any transport can use the given compression strategy.
+func (c *Configurator) RegisterCompressor(z transport.Compressor) error {
+	if c.knownCompressors[z.Name()] != nil {
+		return fmt.Errorf("compressor already registered on configurator for name %q", z.Name())
+	}
+	c.knownCompressors[z.Name()] = z
+	return nil
+}
+
+// MustRegisterCompressor registers the given compressor or panics.
+func (c *Configurator) MustRegisterCompressor(z transport.Compressor) {
+	if err := c.RegisterCompressor(z); err != nil {
+		panic(err)
+	}
+}
+
 // LoadConfigFromYAML loads a yarpc.Config from YAML data. Use LoadConfig if
 // you have already parsed a map[string]interface{} or
 // map[interface{}]interface{}.
@@ -252,8 +272,18 @@ func (c *Configurator) NewDispatcher(serviceName string, data interface{}) (*yar
 	return yarpc.NewDispatcher(cfg), nil
 }
 
+// Kit creates a dependency kit for the configurator, suitable for passing to
+// spec builder functions.
+func (c *Configurator) Kit(serviceName string) *Kit {
+	return &Kit{
+		name:     serviceName,
+		c:        c,
+		resolver: c.resolver,
+	}
+}
+
 func (c *Configurator) load(serviceName string, cfg *yarpcConfig) (_ yarpc.Config, err error) {
-	b := newBuilder(serviceName, &Kit{name: serviceName, c: c, resolver: c.resolver})
+	b := newBuilder(serviceName, c.Kit(serviceName))
 
 	for _, inbound := range cfg.Inbounds {
 		if e := c.loadInboundInto(b, inbound); e != nil {
@@ -273,6 +303,10 @@ func (c *Configurator) load(serviceName string, cfg *yarpcConfig) (_ yarpc.Confi
 		}
 	}
 
+	if e := c.validateLogging(cfg.Logging); e != nil {
+		err = multierr.Append(err, e)
+	}
+
 	if err != nil {
 		return yarpc.Config{}, err
 	}
@@ -283,6 +317,7 @@ func (c *Configurator) load(serviceName string, cfg *yarpcConfig) (_ yarpc.Confi
 	}
 
 	cfg.Logging.fill(&yc)
+	cfg.Metrics.fill(&yc)
 	return yc, nil
 }
 
@@ -361,4 +396,21 @@ func (c *Configurator) spec(name string) (*compiledTransportSpec, error) {
 		return nil, fmt.Errorf("unknown transport %q", name)
 	}
 	return spec, nil
+}
+
+// validateLogging validates if the given logging is valid or not.
+func (c *Configurator) validateLogging(l logging) error {
+	if (l.Levels.ApplicationError != nil || l.Levels.Failure != nil) && (l.Levels.ServerError != nil || l.Levels.ClientError != nil) {
+		return fmt.Errorf("invalid logging configuration, failure/applicationError configuration can not be used with serverError/clientError")
+	}
+
+	if (l.Levels.Outbound.ApplicationError != nil || l.Levels.Outbound.Failure != nil) && (l.Levels.Outbound.ServerError != nil || l.Levels.Outbound.ClientError != nil) {
+		return fmt.Errorf("invalid outbound logging configuration, failure/applicationError configuration can not be used with serverError/clientError")
+	}
+
+	if (l.Levels.Inbound.ApplicationError != nil || l.Levels.Inbound.Failure != nil) && (l.Levels.Inbound.ServerError != nil || l.Levels.Inbound.ClientError != nil) {
+		return fmt.Errorf("invalid inbound logging configuration, failure/applicationError configuration can not be used with serverError/clientError")
+	}
+
+	return nil
 }

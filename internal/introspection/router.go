@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,8 +21,13 @@
 package introspection
 
 import (
+	"fmt"
+
 	"go.uber.org/yarpc/api/transport"
+	"go.uber.org/yarpc/pkg/procedure"
 )
+
+const proto = "proto"
 
 // Procedure represent a registered procedure on a dispatcher.
 type Procedure struct {
@@ -32,9 +37,18 @@ type Procedure struct {
 	RPCType   string `json:"rpcType"`
 }
 
+// ProcedureName outputs a encoding-native procedure name.
+func (p Procedure) ProcedureName() string {
+	// see transport/grpc/util.go#toFullMethod
+	if p.Encoding == proto {
+		svc, method := procedure.FromName(p.Name)
+		return fmt.Sprintf("/%s/%s", svc, method)
+	}
+	return p.Name
+}
+
 // IntrospectProcedures is a convenience function that translate a slice of
-// transport.Procedure to a slice of introspection.Procedure. This output is
-// used in debug and yarpcmeta.
+// transport.Procedure to a slice of introspection.Procedure.
 func IntrospectProcedures(routerProcs []transport.Procedure) []Procedure {
 	procedures := make([]Procedure, 0, len(routerProcs))
 	for _, p := range routerProcs {

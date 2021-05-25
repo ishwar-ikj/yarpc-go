@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -84,7 +84,7 @@ func TestWithRoundRobin(t *testing.T) {
 	temporary, temporaryAddr := spec.NewServer(t, "")
 	defer temporary.Stop()
 
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "listen for bogus server")
 	invalidAddr := l.Addr().String()
 	defer l.Close()

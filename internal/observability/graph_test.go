@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -46,12 +46,14 @@ func TestEdgeNopFallbacks(t *testing.T) {
 		RoutingDelegate: "rd",
 	}
 
+	var tagsBlocklist []string
+
 	// Should succeed, covered by middleware tests.
-	_ = newEdge(zap.NewNop(), meter, req, string(_directionOutbound), transport.Unary)
+	_ = newEdge(zap.NewNop(), meter, tagsBlocklist, req, string(_directionOutbound), transport.Unary)
 
 	// Should fall back to no-op metrics.
 	// Usage of nil metrics should not panic, should not observe changes.
-	e := newEdge(zap.NewNop(), meter, req, string(_directionOutbound), transport.Unary)
+	e := newEdge(zap.NewNop(), meter, tagsBlocklist, req, string(_directionOutbound), transport.Unary)
 
 	e.calls.Inc()
 	assert.Equal(t, int64(0), e.calls.Load(), "Expected to fall back to no-op metrics.")

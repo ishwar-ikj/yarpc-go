@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,13 +25,14 @@ import (
 	"math"
 	"net"
 
+	opentracing "github.com/opentracing/opentracing-go"
 	"go.uber.org/yarpc/api/backoff"
+	"go.uber.org/yarpc/api/transport"
 	intbackoff "go.uber.org/yarpc/internal/backoff"
-
-	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 )
 
 const (
@@ -166,6 +167,28 @@ func ContextDialer(f func(context.Context, string) (net.Conn, error)) DialOption
 	}
 }
 
+// Compressor sets the compressor to be used by default for gRPC connections
+func Compressor(compressor transport.Compressor) DialOption {
+	return func(dialOptions *dialOptions) {
+		if compressor != nil {
+			// We assume that the grpc-go compressor was also globally
+			// registered and just use the name.
+			// Future implementations may elect to actually use the compressor.
+			dialOptions.defaultCompressor = compressor.Name()
+		}
+	}
+}
+
+// KeepaliveParams sets the gRPC keepalive parameters of the outbound
+// connection.
+// See https://pkg.go.dev/google.golang.org/grpc#WithKeepaliveParams for more
+// details.
+func KeepaliveParams(params keepalive.ClientParameters) DialOption {
+	return func(dialOptions *dialOptions) {
+		dialOptions.keepaliveParams = &params
+	}
+}
+
 type transportOptions struct {
 	backoffStrategy      backoff.Strategy
 	tracer               opentracing.Tracer
@@ -193,9 +216,6 @@ func newTransportOptions(options []TransportOption) *transportOptions {
 	if transportOptions.tracer == nil {
 		transportOptions.tracer = opentracing.GlobalTracer()
 	}
-	if transportOptions.tracer == nil {
-		transportOptions.tracer = opentracing.NoopTracer{}
-	}
 	return transportOptions
 }
 
@@ -222,8 +242,10 @@ func newOutboundOptions(options []OutboundOption) *outboundOptions {
 }
 
 type dialOptions struct {
-	creds         credentials.TransportCredentials
-	contextDialer func(context.Context, string) (net.Conn, error)
+	creds             credentials.TransportCredentials
+	contextDialer     func(context.Context, string) (net.Conn, error)
+	defaultCompressor string
+	keepaliveParams   *keepalive.ClientParameters
 }
 
 func (d *dialOptions) grpcOptions() []grpc.DialOption {
@@ -232,10 +254,20 @@ func (d *dialOptions) grpcOptions() []grpc.DialOption {
 		credsOption = grpc.WithTransportCredentials(d.creds)
 	}
 
-	return []grpc.DialOption{
+	opts := []grpc.DialOption{
 		credsOption,
 		grpc.WithContextDialer(d.contextDialer),
 	}
+
+	if d.defaultCompressor != "" {
+		opts = append(opts, grpc.WithDefaultCallOptions(grpc.UseCompressor(d.defaultCompressor)))
+	}
+
+	if d.keepaliveParams != nil {
+		opts = append(opts, grpc.WithKeepaliveParams(*d.keepaliveParams))
+	}
+
+	return opts
 }
 
 func newDialOptions(options []DialOption) *dialOptions {

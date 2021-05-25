@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -39,6 +39,9 @@ var (
 	// Latency buckets for histograms. At some point, we may want to make these
 	// configurable.
 	_bucketsMs = bucket.NewRPCLatency()
+	// Bytes buckets for payload size histograms, containing exponential buckets
+	// in range of 0B, 1B, 2B, ... 256MB.
+	_bucketsBytes = append([]int64{0}, bucket.NewExponential(1, 2, 29)...)
 )
 
 type directionName string
@@ -46,14 +49,19 @@ type directionName string
 const (
 	_directionOutbound directionName = "outbound"
 	_directionInbound  directionName = "inbound"
+
+	// _droppedTagValue represents the value of a metric tag when the tag
+	// is being blocked.
+	_droppedTagValue = "__dropped__"
 )
 
 // A graph represents a collection of services: each service is a node, and we
 // collect stats for each caller-callee-transport-encoding-procedure-rk-sk-rd edge.
 type graph struct {
-	meter   *metrics.Scope
-	logger  *zap.Logger
-	extract ContextExtractor
+	meter               *metrics.Scope
+	logger              *zap.Logger
+	extract             ContextExtractor
+	metricTagsBlocklist []string
 
 	edgesMu sync.RWMutex
 	edges   map[string]*edge
@@ -61,21 +69,26 @@ type graph struct {
 	inboundLevels, outboundLevels levels
 }
 
-func newGraph(meter *metrics.Scope, logger *zap.Logger, extract ContextExtractor) graph {
+func newGraph(meter *metrics.Scope, logger *zap.Logger, extract ContextExtractor, metricTagsBlocklist []string) graph {
 	return graph{
-		edges:   make(map[string]*edge, _defaultGraphSize),
-		meter:   meter,
-		logger:  logger,
-		extract: extract,
+		edges:               make(map[string]*edge, _defaultGraphSize),
+		meter:               meter,
+		logger:              logger,
+		extract:             extract,
+		metricTagsBlocklist: metricTagsBlocklist,
 		inboundLevels: levels{
 			success:          zapcore.DebugLevel,
 			failure:          zapcore.ErrorLevel,
 			applicationError: zapcore.ErrorLevel,
+			serverError:      zapcore.ErrorLevel,
+			clientError:      zapcore.ErrorLevel,
 		},
 		outboundLevels: levels{
 			success:          zapcore.DebugLevel,
 			failure:          zapcore.ErrorLevel,
 			applicationError: zapcore.ErrorLevel,
+			serverError:      zapcore.ErrorLevel,
+			clientError:      zapcore.ErrorLevel,
 		},
 	}
 }
@@ -138,7 +151,7 @@ func (g *graph) createEdge(key []byte, req *transport.Request, direction string,
 		return e
 	}
 
-	e := newEdge(g.logger, g.meter, req, direction, rpcType)
+	e := newEdge(g.logger, g.meter, g.metricTagsBlocklist, req, direction, rpcType)
 	g.edges[string(key)] = e
 	return e
 }
@@ -150,14 +163,18 @@ type edge struct {
 
 	calls          *metrics.Counter
 	successes      *metrics.Counter
+	panics         *metrics.Counter
 	callerFailures *metrics.CounterVector
 	serverFailures *metrics.CounterVector
 
-	latencies          *metrics.Histogram
-	callerErrLatencies *metrics.Histogram
-	serverErrLatencies *metrics.Histogram
-
-	streaming *streamEdge
+	latencies            *metrics.Histogram
+	callerErrLatencies   *metrics.Histogram
+	serverErrLatencies   *metrics.Histogram
+	ttls                 *metrics.Histogram
+	timeoutTtls          *metrics.Histogram
+	requestPayloadSizes  *metrics.Histogram
+	responsePayloadSizes *metrics.Histogram
+	streaming            *streamEdge
 }
 
 // streamEdge metrics should only be used for streaming requests.
@@ -170,13 +187,16 @@ type streamEdge struct {
 	receiveSuccesses *metrics.Counter
 	receiveFailures  *metrics.CounterVector
 
-	streamDurations *metrics.Histogram
-	streamsActive   *metrics.Gauge
+	streamDurations            *metrics.Histogram
+	streamRequestPayloadSizes  *metrics.Histogram
+	streamResponsePayloadSizes *metrics.Histogram
+
+	streamsActive *metrics.Gauge
 }
 
 // newEdge constructs a new edge. Since Registries enforce metric uniqueness,
 // edges should be cached and re-used for each RPC.
-func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, direction string, rpcType transport.Type) *edge {
+func newEdge(logger *zap.Logger, meter *metrics.Scope, metricTagsBlocklist []string, req *transport.Request, direction string, rpcType transport.Type) *edge {
 	tags := metrics.Tags{
 		"source":           req.Caller,
 		"dest":             req.Service,
@@ -187,6 +207,10 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 		"routing_delegate": req.RoutingDelegate,
 		"direction":        direction,
 		"rpc_type":         rpcType.String(),
+	}
+
+	for _, tagName := range metricTagsBlocklist {
+		tags[tagName] = _droppedTagValue
 	}
 
 	// metrics for all RPCs
@@ -206,11 +230,19 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 	if err != nil {
 		logger.Error("Failed to create successes counter.", zap.Error(err))
 	}
+	panics, err := meter.Counter(metrics.Spec{
+		Name:      "panics",
+		Help:      "Number of RPCs failed because of panic.",
+		ConstTags: tags,
+	})
+	if err != nil {
+		logger.Error("Failed to create panics counter.", zap.Error(err))
+	}
 	callerFailures, err := meter.CounterVector(metrics.Spec{
 		Name:      "caller_failures",
 		Help:      "Number of RPCs failed because of caller error.",
 		ConstTags: tags,
-		VarTags:   []string{_error},
+		VarTags:   []string{_error, _errorNameMetricsKey},
 	})
 	if err != nil {
 		logger.Error("Failed to create caller failures vector.", zap.Error(err))
@@ -219,14 +251,15 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 		Name:      "server_failures",
 		Help:      "Number of RPCs failed because of server error.",
 		ConstTags: tags,
-		VarTags:   []string{_error},
+		VarTags:   []string{_error, _errorNameMetricsKey},
 	})
 	if err != nil {
 		logger.Error("Failed to create server failures vector.", zap.Error(err))
 	}
 
 	// metrics for only unary and oneway
-	var latencies, callerErrLatencies, serverErrLatencies *metrics.Histogram
+	var latencies, callerErrLatencies, serverErrLatencies, ttls, timeoutTtls,
+		requestPayloadSizes, responsePayloadSizes *metrics.Histogram
 	if rpcType == transport.Unary || rpcType == transport.Oneway {
 		latencies, err = meter.Histogram(metrics.HistogramSpec{
 			Spec: metrics.Spec{
@@ -263,6 +296,54 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 		})
 		if err != nil {
 			logger.Error("Failed to create server failure latency distribution.", zap.Error(err))
+		}
+		ttls, err = meter.Histogram(metrics.HistogramSpec{
+			Spec: metrics.Spec{
+				Name:      "ttl_ms",
+				Help:      "TTL distribution of the RPCs passed by the caller",
+				ConstTags: tags,
+			},
+			Unit:    time.Millisecond,
+			Buckets: _bucketsMs,
+		})
+		if err != nil {
+			logger.Error("Failed to create ttl distribution.", zap.Error(err))
+		}
+		timeoutTtls, err = meter.Histogram(metrics.HistogramSpec{
+			Spec: metrics.Spec{
+				Name:      "timeout_ttl_ms",
+				Help:      "TTL distribution of the RPCs passed by caller which failed due to timeout",
+				ConstTags: tags,
+			},
+			Unit:    time.Millisecond,
+			Buckets: _bucketsMs,
+		})
+		if err != nil {
+			logger.Error("Failed to create timeout ttl distribution.", zap.Error(err))
+		}
+		requestPayloadSizes, err = meter.Histogram(metrics.HistogramSpec{
+			Spec: metrics.Spec{
+				Name:      "request_payload_size_bytes",
+				Help:      "Request payload size distribution of the RPCs in bytes",
+				ConstTags: tags,
+			},
+			Unit:    time.Millisecond, // Unit is relevent for this histogram
+			Buckets: _bucketsBytes,
+		})
+		if err != nil {
+			logger.Error("Failed to create request payload size histogram.", zap.Error(err))
+		}
+		responsePayloadSizes, err = meter.Histogram(metrics.HistogramSpec{
+			Spec: metrics.Spec{
+				Name:      "response_payload_size_bytes",
+				Help:      "Response payload size distribution of the RPCs in bytes",
+				ConstTags: tags,
+			},
+			Unit:    time.Millisecond, // Unit is relevent for this histogram
+			Buckets: _bucketsBytes,
+		})
+		if err != nil {
+			logger.Error("Failed to create response payload size histogram.", zap.Error(err))
 		}
 	}
 
@@ -336,6 +417,33 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 		if err != nil {
 			logger.DPanic("Failed to create stream duration histogram.", zap.Error(err))
 		}
+
+		streamRequestPayloadSizes, err := meter.Histogram(metrics.HistogramSpec{
+			Spec: metrics.Spec{
+				Name:      "stream_request_payload_size_bytes",
+				Help:      "Stream request payload size distribution",
+				ConstTags: tags,
+			},
+			Unit:    time.Millisecond,
+			Buckets: _bucketsBytes,
+		})
+		if err != nil {
+			logger.DPanic("Failed to create stream request payload size histogram", zap.Error(err))
+		}
+
+		streamResponsePayloadSizes, err := meter.Histogram(metrics.HistogramSpec{
+			Spec: metrics.Spec{
+				Name:      "stream_response_payload_size_bytes",
+				Help:      "Stream response payload size distribution",
+				ConstTags: tags,
+			},
+			Unit:    time.Millisecond,
+			Buckets: _bucketsBytes,
+		})
+		if err != nil {
+			logger.DPanic("Failed to create stream response payload size histogram", zap.Error(err))
+		}
+
 		streamsActive, err := meter.Gauge(metrics.Spec{
 			Name:      "streams_active",
 			Help:      "Number of active streams.",
@@ -352,8 +460,12 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 			receives:         receives,
 			receiveSuccesses: receiveSuccesses,
 			receiveFailures:  receiveFailures,
-			streamDurations:  streamDurations,
-			streamsActive:    streamsActive,
+
+			streamDurations:            streamDurations,
+			streamRequestPayloadSizes:  streamRequestPayloadSizes,
+			streamResponsePayloadSizes: streamResponsePayloadSizes,
+
+			streamsActive: streamsActive,
 		}
 	}
 
@@ -368,15 +480,20 @@ func newEdge(logger *zap.Logger, meter *metrics.Scope, req *transport.Request, d
 		zap.String("direction", direction),
 	)
 	return &edge{
-		logger:             logger,
-		calls:              calls,
-		successes:          successes,
-		callerFailures:     callerFailures,
-		serverFailures:     serverFailures,
-		latencies:          latencies,
-		callerErrLatencies: callerErrLatencies,
-		serverErrLatencies: serverErrLatencies,
-		streaming:          streaming,
+		logger:               logger,
+		calls:                calls,
+		successes:            successes,
+		panics:               panics,
+		callerFailures:       callerFailures,
+		serverFailures:       serverFailures,
+		requestPayloadSizes:  requestPayloadSizes,
+		responsePayloadSizes: responsePayloadSizes,
+		latencies:            latencies,
+		callerErrLatencies:   callerErrLatencies,
+		serverErrLatencies:   serverErrLatencies,
+		ttls:                 ttls,
+		timeoutTtls:          timeoutTtls,
+		streaming:            streaming,
 	}
 }
 

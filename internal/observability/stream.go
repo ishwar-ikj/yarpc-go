@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,7 @@ package observability
 
 import (
 	"context"
+	"io"
 
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/zap"
@@ -34,7 +35,11 @@ const (
 	_errorStreamSend         = "Error sending stream message"
 )
 
-var _ transport.StreamCloser = (*streamWrapper)(nil)
+var (
+	_ transport.StreamCloser        = (*streamWrapper)(nil)
+	_ transport.StreamHeadersSender = (*streamWrapper)(nil)
+	_ transport.StreamHeadersReader = (*streamWrapper)(nil)
+)
 
 type streamWrapper struct {
 	transport.StreamCloser
@@ -79,8 +84,13 @@ func (c call) WrapServerStream(stream *transport.ServerStream) *transport.Server
 }
 
 func (s *streamWrapper) SendMessage(ctx context.Context, msg *transport.StreamMessage) error {
+	// TODO: handle panic for metrics
+	if s.call.direction == _directionInbound && msg != nil {
+		s.edge.streamResponsePayloadSizes.IncBucket(int64(msg.BodySize))
+	}
+
 	err := s.StreamCloser.SendMessage(ctx, msg)
-	s.call.logStreamEvent(err, _successfulStreamSend, _errorStreamSend)
+	s.call.logStreamEvent(err, err == nil, _successfulStreamSend, _errorStreamSend)
 
 	s.edge.sends.Inc()
 	if err == nil {
@@ -97,13 +107,22 @@ func (s *streamWrapper) SendMessage(ctx context.Context, msg *transport.StreamMe
 }
 
 func (s *streamWrapper) ReceiveMessage(ctx context.Context) (*transport.StreamMessage, error) {
+	// TODO: handle panic for metrics
 	msg, err := s.StreamCloser.ReceiveMessage(ctx)
-	s.call.logStreamEvent(err, _successfulStreamReceive, _errorStreamReceive)
+	if err == nil && msg != nil && s.call.direction == _directionInbound {
+		s.edge.streamRequestPayloadSizes.IncBucket(int64(msg.BodySize))
+	}
+	// Receiving EOF does not constitute an error for the purposes of metrics and alerts.
+	// This is the only special case.
+	// All other log events treat EOF as an error, including when sending a
+	// message or concluding a handshake.
+	success := err == nil || err == io.EOF
+	s.call.logStreamEvent(err, success, _successfulStreamReceive, _errorStreamReceive)
 
 	s.edge.receives.Inc()
-	if err == nil {
+	if success {
 		s.edge.receiveSuccesses.Inc()
-		return msg, nil
+		return msg, err
 	}
 
 	if recvFailureCounter, err2 := s.edge.receiveFailures.Get(_error, errToMetricString(err)); err2 != nil {
@@ -121,6 +140,14 @@ func (s *streamWrapper) Close(ctx context.Context) error {
 	return err
 }
 
+func (s *streamWrapper) SendHeaders(headers transport.Headers) error {
+	return transport.SendStreamHeaders(s.StreamCloser, headers)
+}
+
+func (s *streamWrapper) Headers() (transport.Headers, error) {
+	return transport.ReadStreamHeaders(s.StreamCloser)
+}
+
 // This is a light wrapper so that we can re-use the same methods for
 // instrumenting observability. The transport.ClientStream has an additional
 // Close(ctx) method, unlike the transport.ServerStream.
@@ -130,4 +157,8 @@ type nopCloser struct {
 
 func (c nopCloser) Close(ctx context.Context) error {
 	return nil
+}
+
+func (c nopCloser) SendHeaders(headers transport.Headers) error {
+	return transport.SendStreamHeaders(c.Stream, headers)
 }

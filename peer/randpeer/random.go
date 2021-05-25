@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,8 @@ package randpeer
 
 import (
 	"math/rand"
+	"sync"
+	"time"
 
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/api/transport"
@@ -31,6 +33,23 @@ import (
 type randomList struct {
 	subscribers []*subscriber
 	random      *rand.Rand
+
+	m sync.RWMutex
+}
+
+// Option configures the peer list implementation constructor.
+type Option interface {
+	apply(*options)
+}
+
+type options struct{}
+
+// NewImplementation creates a new random abstractlist.Implementation.
+//
+// Use this constructor instead of NewList, when wanting to do custom peer
+// connection management.
+func NewImplementation(opts ...Option) abstractlist.Implementation {
+	return newRandomList(10, rand.NewSource(time.Now().UnixNano()))
 }
 
 func newRandomList(cap int, source rand.Source) *randomList {
@@ -40,9 +59,10 @@ func newRandomList(cap int, source rand.Source) *randomList {
 	}
 }
 
-var _ abstractlist.Implementation = (*randomList)(nil)
-
 func (r *randomList) Add(peer peer.StatusPeer, _ peer.Identifier) abstractlist.Subscriber {
+	r.m.Lock()
+	defer r.m.Unlock()
+
 	index := len(r.subscribers)
 	r.subscribers = append(r.subscribers, &subscriber{
 		index: index,
@@ -52,6 +72,9 @@ func (r *randomList) Add(peer peer.StatusPeer, _ peer.Identifier) abstractlist.S
 }
 
 func (r *randomList) Remove(peer peer.StatusPeer, _ peer.Identifier, ps abstractlist.Subscriber) {
+	r.m.Lock()
+	defer r.m.Unlock()
+
 	sub, ok := ps.(*subscriber)
 	if !ok || len(r.subscribers) == 0 {
 		return
@@ -64,6 +87,11 @@ func (r *randomList) Remove(peer peer.StatusPeer, _ peer.Identifier, ps abstract
 }
 
 func (r *randomList) Choose(_ *transport.Request) peer.StatusPeer {
+	// Usage of a wite lock because r.random.Intn is not thread safe
+	// see: https://golang.org/pkg/math/rand/
+	r.m.Lock()
+	defer r.m.Unlock()
+
 	if len(r.subscribers) == 0 {
 		return nil
 	}

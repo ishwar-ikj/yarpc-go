@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -106,7 +106,7 @@ func (mr *_MockClientRecorder) <.Name>(
 <end>
 `
 
-func gomockGenerator(data *templateData, files map[string][]byte) (err error) {
+func gomockGenerator(data *serviceTemplateData, files map[string][]byte) (err error) {
 	packageName := filepath.Base(data.TestPackagePath())
 	// kv.thrift => .../kv/keyvaluetest/client.go
 	path := filepath.Join(data.Module.Directory, packageName, "client.go")

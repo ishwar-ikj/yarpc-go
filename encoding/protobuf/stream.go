@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,6 @@ package protobuf
 import (
 	"bytes"
 	"context"
-	"io"
 
 	"github.com/gogo/protobuf/proto"
 	"go.uber.org/yarpc/api/transport"
@@ -38,7 +37,7 @@ func readFromStream(
 ) (proto.Message, error) {
 	streamMsg, err := stream.ReceiveMessage(ctx)
 	if err != nil {
-		return nil, err
+		return nil, convertFromYARPCError(Encoding, err, codec)
 	}
 	message := newMessage()
 	if err := unmarshal(stream.Request().Meta.Encoding, streamMsg.Body, message, codec); err != nil {
@@ -60,13 +59,17 @@ func writeToStream(ctx context.Context, stream transport.Stream, message proto.M
 	return stream.SendMessage(
 		ctx,
 		&transport.StreamMessage{
-			Body: readCloser{Reader: bytes.NewReader(messageData), closer: cleanup},
+			Body: readCloser{
+				Reader: bytes.NewReader(messageData),
+				closer: cleanup,
+			},
+			BodySize: len(messageData),
 		},
 	)
 }
 
 type readCloser struct {
-	io.Reader
+	*bytes.Reader
 	closer func()
 }
 

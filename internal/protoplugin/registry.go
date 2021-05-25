@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -304,7 +304,12 @@ func defaultGoPackageName(f *descriptor.FileDescriptorProto) string {
 func packageIdentityName(f *descriptor.FileDescriptorProto) string {
 	if f.Options != nil && f.Options.GoPackage != nil {
 		gopkg := f.Options.GetGoPackage()
-		idx := strings.LastIndex(gopkg, "/")
+		// if go_package specifies an alias in the form of full/path/package;alias, use alias over package
+		idx := strings.Index(gopkg, ";")
+		if idx >= 0 {
+			return gopkg[idx+1:]
+		}
+		idx = strings.LastIndex(gopkg, "/")
 		if idx < 0 {
 			return gopkg
 		}

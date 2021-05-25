@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -75,6 +75,8 @@ func checkForbiddenCharacters(name string) error {
 		case '0' <= c && c <= '9':
 			continue
 		case c == '-':
+			continue
+		case c == '_':
 			continue
 		default:
 			return fmt.Errorf("service name %q contains characters other than [0-9a-z] and hyphens", name)

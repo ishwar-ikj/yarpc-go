@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,7 +25,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -199,7 +202,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "arg2 reader error",
@@ -215,7 +217,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "arg2 parse error",
@@ -231,7 +232,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "arg3 reader error",
@@ -247,7 +247,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "internal error",
@@ -278,7 +277,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "arg3 encode error",
@@ -312,7 +310,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "handler timeout",
@@ -349,7 +346,6 @@ func TestHandlerFailures(t *testing.T) {
 			newResponseWriter: newHandlerWriter,
 			recorder:          newResponseRecorder(),
 			wantLogLevel:      zapcore.ErrorLevel,
-			wantLogMessage:    "handler failed",
 		},
 		{
 			desc: "handler panic",
@@ -405,70 +401,77 @@ func TestHandlerFailures(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		ctx, cancel := context.WithTimeout(context.Background(), testtime.Second)
-		if tt.ctx != nil {
-			ctx = tt.ctx
-		} else if tt.ctxFunc != nil {
-			ctx, cancel = tt.ctxFunc()
-		}
-		defer cancel()
+		t.Run(tt.desc, func(t *testing.T) {
 
-		core, logs := observer.New(zapcore.ErrorLevel)
-		mockCtrl := gomock.NewController(t)
-		thandler := transporttest.NewMockUnaryHandler(mockCtrl)
-		spec := transport.NewUnaryHandlerSpec(thandler)
-
-		if tt.expectCall != nil {
-			tt.expectCall(thandler)
-		}
-
-		resp := tt.recorder
-		tt.sendCall.resp = resp
-
-		router := transporttest.NewMockRouter(mockCtrl)
-		router.EXPECT().Choose(gomock.Any(), routertest.NewMatcher().
-			WithService(tt.sendCall.service).
-			WithProcedure(tt.sendCall.method),
-		).Return(spec, nil).AnyTimes()
-
-		handler{router: router, logger: zap.New(core).Named("tchannel"), newResponseWriter: tt.newResponseWriter}.handle(ctx, tt.sendCall)
-		err := resp.SystemError()
-		require.Error(t, err, "expected error for %q", tt.desc)
-
-		systemErr, isSystemErr := err.(tchannel.SystemError)
-		require.True(t, isSystemErr, "expected %v for %q to be a system error", err, tt.desc)
-		assert.Equal(t, tt.wantStatus, systemErr.Code(), tt.desc)
-
-		getLog := func() observer.LoggedEntry {
-			entries := logs.TakeAll()
-			return entries[0]
-		}
-
-		if tt.wantLogMessage != "" {
-			log := getLog()
-			logContext := log.ContextMap()
-			assert.Equal(t, tt.wantLogLevel, log.Entry.Level, "Unexpected log level")
-			assert.Equal(t, tt.wantLogMessage, log.Entry.Message, "Unexpected log message written")
-			assert.Equal(t, "tchannel", log.LoggerName, "Unexpected logger name")
-			if tt.wantErrMessage != "" {
-				assert.Equal(t, tt.wantErrMessage, logContext["error"], "Unexpected error message")
+			ctx, cancel := context.WithTimeout(context.Background(), testtime.Second)
+			if tt.ctx != nil {
+				ctx = tt.ctx
+			} else if tt.ctxFunc != nil {
+				ctx, cancel = tt.ctxFunc()
 			}
-		}
+			defer cancel()
 
-		mockCtrl.Finish()
+			core, logs := observer.New(zapcore.ErrorLevel)
+			mockCtrl := gomock.NewController(t)
+			defer mockCtrl.Finish()
+
+			thandler := transporttest.NewMockUnaryHandler(mockCtrl)
+			spec := transport.NewUnaryHandlerSpec(thandler)
+
+			if tt.expectCall != nil {
+				tt.expectCall(thandler)
+			}
+
+			resp := tt.recorder
+			tt.sendCall.resp = resp
+
+			router := transporttest.NewMockRouter(mockCtrl)
+			router.EXPECT().Choose(gomock.Any(), routertest.NewMatcher().
+				WithService(tt.sendCall.service).
+				WithProcedure(tt.sendCall.method),
+			).Return(spec, nil).AnyTimes()
+
+			handler{router: router, logger: zap.New(core).Named("tchannel"), newResponseWriter: tt.newResponseWriter}.handle(ctx, tt.sendCall)
+			err := resp.SystemError()
+			require.Error(t, err, "expected error for %q", tt.desc)
+
+			systemErr, isSystemErr := err.(tchannel.SystemError)
+			require.True(t, isSystemErr, "expected %v for %q to be a system error", err, tt.desc)
+			assert.Equal(t, tt.wantStatus, systemErr.Code(), tt.desc)
+
+			getLog := func() observer.LoggedEntry {
+				entries := logs.TakeAll()
+				return entries[0]
+			}
+
+			if tt.wantLogMessage != "" {
+				log := getLog()
+				logContext := log.ContextMap()
+				assert.Equal(t, tt.wantLogLevel, log.Entry.Level, "Unexpected log level")
+				assert.Equal(t, tt.wantLogMessage, log.Entry.Message, "Unexpected log message written")
+				assert.Equal(t, "tchannel", log.LoggerName, "Unexpected logger name")
+				if tt.wantErrMessage != "" {
+					assert.Equal(t, tt.wantErrMessage, logContext["error"], "Unexpected error message")
+				}
+			}
+		})
 	}
 }
 
 func TestResponseWriter(t *testing.T) {
+	yErrAborted := yarpcerrors.CodeAborted
+
 	tests := []struct {
+		name             string
 		format           tchannel.Format
 		apply            func(responseWriter)
-		arg2             []byte
+		arg2             map[string]string // use map since ordering isn't guaranteed
 		arg3             []byte
 		applicationError bool
 		headerCase       headerCase
 	}{
 		{
+			name:   "raw lowercase headers",
 			format: tchannel.Raw,
 			apply: func(w responseWriter) {
 				headers := transport.HeadersFromMap(map[string]string{"foo": "bar"})
@@ -478,14 +481,11 @@ func TestResponseWriter(t *testing.T) {
 				_, err = w.Write([]byte("world"))
 				require.NoError(t, err)
 			},
-			arg2: []byte{
-				0x00, 0x01,
-				0x00, 0x03, 'f', 'o', 'o',
-				0x00, 0x03, 'b', 'a', 'r',
-			},
+			arg2: map[string]string{"foo": "bar"},
 			arg3: []byte("hello world"),
 		},
 		{
+			name:   "raw mixed-case headers",
 			format: tchannel.Raw,
 			apply: func(w responseWriter) {
 				headers := transport.HeadersFromMap(map[string]string{"FoO": "bAr"})
@@ -495,15 +495,12 @@ func TestResponseWriter(t *testing.T) {
 				_, err = w.Write([]byte("world"))
 				require.NoError(t, err)
 			},
-			arg2: []byte{
-				0x00, 0x01,
-				0x00, 0x03, 'F', 'o', 'O',
-				0x00, 0x03, 'b', 'A', 'r',
-			},
+			arg2:       map[string]string{"FoO": "bAr"},
 			arg3:       []byte("hello world"),
 			headerCase: originalHeaderCase,
 		},
 		{
+			name:   "raw multiple writes",
 			format: tchannel.Raw,
 			apply: func(w responseWriter) {
 				_, err := w.Write([]byte("foo"))
@@ -511,10 +508,11 @@ func TestResponseWriter(t *testing.T) {
 				_, err = w.Write([]byte("bar"))
 				require.NoError(t, err)
 			},
-			arg2: []byte{0x00, 0x00},
+			arg2: nil,
 			arg3: []byte("foobar"),
 		},
 		{
+			name:   "json lowercase headers",
 			format: tchannel.JSON,
 			apply: func(w responseWriter) {
 				headers := transport.HeadersFromMap(map[string]string{"foo": "bar"})
@@ -523,10 +521,11 @@ func TestResponseWriter(t *testing.T) {
 				_, err := w.Write([]byte("{}"))
 				require.NoError(t, err)
 			},
-			arg2: []byte(`{"foo":"bar"}` + "\n"),
+			arg2: map[string]string{"foo": "bar"},
 			arg3: []byte("{}"),
 		},
 		{
+			name:   "json mixed-case headers",
 			format: tchannel.JSON,
 			apply: func(w responseWriter) {
 				headers := transport.HeadersFromMap(map[string]string{"FoO": "bAr"})
@@ -535,48 +534,69 @@ func TestResponseWriter(t *testing.T) {
 				_, err := w.Write([]byte("{}"))
 				require.NoError(t, err)
 			},
-			arg2:       []byte(`{"FoO":"bAr"}` + "\n"),
+			arg2:       map[string]string{"FoO": "bAr"},
 			arg3:       []byte("{}"),
 			headerCase: originalHeaderCase,
 		},
 		{
+			name:   "json empty",
 			format: tchannel.JSON,
 			apply: func(w responseWriter) {
 				_, err := w.Write([]byte("{}"))
 				require.NoError(t, err)
 			},
-			arg2: []byte("{}\n"),
+			arg2: nil,
 			arg3: []byte("{}"),
 		},
 		{
+			name:   "application error write",
 			format: tchannel.Raw,
 			apply: func(w responseWriter) {
 				w.SetApplicationError()
+				w.SetApplicationErrorMeta(
+					&transport.ApplicationErrorMeta{
+						Name:    "bAz",
+						Code:    &yErrAborted,
+						Details: "App Error Details",
+					},
+				)
 				_, err := w.Write([]byte("hello"))
 				require.NoError(t, err)
 			},
-			arg2:             []byte{0x00, 0x00},
+			arg2: map[string]string{
+				"$rpc$-application-error-code":    "10",
+				"$rpc$-application-error-name":    "bAz",
+				"$rpc$-application-error-details": "App Error Details",
+			},
 			arg3:             []byte("hello"),
 			applicationError: true,
 		},
 	}
 
 	for _, tt := range tests {
-		call := &fakeInboundCall{format: tt.format}
-		resp := newResponseRecorder()
-		call.resp = resp
+		t.Run(tt.name, func(t *testing.T) {
 
-		w := newHandlerWriter(call.Response(), call.Format(), tt.headerCase)
-		tt.apply(w)
-		assert.NoError(t, w.Close())
+			call := &fakeInboundCall{format: tt.format}
+			resp := newResponseRecorder()
+			call.resp = resp
 
-		assert.Nil(t, resp.systemErr)
-		assert.Equal(t, tt.arg2, resp.arg2.Bytes())
-		assert.Equal(t, tt.arg3, resp.arg3.Bytes())
+			w := newHandlerWriter(call.Response(), call.Format(), tt.headerCase)
+			tt.apply(w)
+			assert.NoError(t, w.Close())
 
-		if tt.applicationError {
-			assert.True(t, resp.applicationError, "expected an application error")
-		}
+			assert.Nil(t, resp.systemErr)
+
+			// read headers as a map since ordering is not guaranteed
+			gotHeaders, err := readHeaders(tt.format, func() (tchannel.ArgReader, error) { return resp.arg2, nil })
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.arg2, gotHeaders.OriginalItems(), "headers mismatch")
+			assert.Equal(t, tt.arg3, resp.arg3.Bytes())
+
+			if tt.applicationError {
+				assert.True(t, resp.applicationError, "expected an application error")
+			}
+		})
 	}
 }
 
@@ -655,11 +675,149 @@ func TestGetSystemError(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		t.Run(string(i), func(t *testing.T) {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			gotErr := getSystemError(tt.giveErr)
 			tchErr, ok := gotErr.(tchannel.SystemError)
 			require.True(t, ok, "did not return tchannel error")
 			assert.Equal(t, tt.wantCode, tchErr.Code())
 		})
 	}
+}
+
+func TestHandlerSystemErrorLogs(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	defer mockCtrl.Finish()
+
+	zapCore, observedLogs := observer.New(zapcore.ErrorLevel)
+	router := transporttest.NewMockRouter(mockCtrl)
+	transportHandler := &testUnaryHandler{}
+	spec := transport.NewUnaryHandlerSpec(transportHandler)
+
+	tchannelHandler := handler{
+		router:            router,
+		logger:            zap.New(zapCore),
+		newResponseWriter: newHandlerWriter,
+	}
+
+	router.EXPECT().Choose(gomock.Any(), gomock.Any()).Return(spec, nil).Times(4)
+
+	inboundCall := &fakeInboundCall{
+		service: "foo-service",
+		caller:  "foo-caller",
+		method:  "foo-method",
+		format:  tchannel.JSON,
+		arg2:    []byte{},
+		arg3:    []byte{},
+		resp:    newFaultyResponseRecorder(),
+	}
+
+	t.Run("client awaiting response", func(t *testing.T) {
+		t.Run("handler success", func(t *testing.T) {
+			transportHandler.reset()
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			tchannelHandler.handle(ctx, inboundCall)
+			logs := observedLogs.TakeAll()
+			require.Len(t, logs, 2, "unexpected number of logs")
+
+			assert.Equal(t, logs[0].Message, "SendSystemError failed", "unexpected log message")
+			assert.Equal(t, logs[1].Message, "responseWriter failed to close", "unexpected log message")
+		})
+
+		t.Run("handler error", func(t *testing.T) {
+			transportHandler.reset()
+			transportHandler.err = errors.New("handler error")
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+
+			tchannelHandler.handle(ctx, inboundCall)
+			logs := observedLogs.TakeAll()
+			require.Len(t, logs, 1, "unexpected number of logs")
+
+			assert.Equal(t, logs[0].Message, "SendSystemError failed", "unexpected log message")
+		})
+	})
+
+	t.Run("client timed out", func(t *testing.T) {
+		t.Run("handler success", func(t *testing.T) {
+			transportHandler.reset()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			transportHandler.fn = func() { <-ctx.Done() } // ensure client times out
+
+			tchannelHandler.handle(ctx, inboundCall)
+			require.Empty(t, observedLogs.TakeAll(), "expected no logs")
+		})
+
+		t.Run("handler err", func(t *testing.T) {
+			transportHandler.reset()
+			transportHandler.err = errors.New("handler error")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			transportHandler.fn = func() { <-ctx.Done() } // ensure client times out
+
+			tchannelHandler.handle(ctx, inboundCall)
+			require.Empty(t, observedLogs.TakeAll(), "expected no logs")
+		})
+	})
+}
+
+func TestTruncatedHeader(t *testing.T) {
+	tests := []struct {
+		name         string
+		value        string
+		wantTruncate bool
+	}{
+		{
+			name:  "no-op",
+			value: "foo bar",
+		},
+		{
+			name:  "max",
+			value: strings.Repeat("a", _maxAppErrDetailsHeaderLen),
+		},
+		{
+			name:         "truncate",
+			value:        strings.Repeat("b", _maxAppErrDetailsHeaderLen*2),
+			wantTruncate: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateAppErrDetails(tt.value)
+
+			if !tt.wantTruncate {
+				assert.Equal(t, tt.value, got, "expected no-op")
+				return
+			}
+
+			assert.True(t, strings.HasSuffix(got, _truncatedHeaderMessage), "unexpected truncate suffix")
+			assert.Len(t, got, _maxAppErrDetailsHeaderLen, "did not truncate")
+		})
+	}
+}
+
+type testUnaryHandler struct {
+	err error
+	fn  func()
+}
+
+func (h *testUnaryHandler) Handle(context.Context, *transport.Request, transport.ResponseWriter) error {
+	if h.fn != nil {
+		h.fn()
+	}
+	return h.err
+}
+
+func (h *testUnaryHandler) reset() {
+	h.err = nil
+	h.fn = nil
 }

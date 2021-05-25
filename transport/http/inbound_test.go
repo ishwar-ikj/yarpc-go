@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -47,7 +47,7 @@ import (
 
 func TestStartAddrInUse(t *testing.T) {
 	t1 := NewTransport()
-	i1 := t1.NewInbound(":0")
+	i1 := t1.NewInbound("127.0.0.1:0")
 
 	assert.Len(t, i1.Transports(), 1, "transports must contain the transport")
 	// we use == instead of assert.Equal because we want to do a pointer
@@ -74,10 +74,10 @@ func TestStartAddrInUse(t *testing.T) {
 
 func TestNilAddrAfterStop(t *testing.T) {
 	x := NewTransport()
-	i := x.NewInbound(":0")
+	i := x.NewInbound("127.0.0.1:0")
 	i.SetRouter(newTestRouter(nil))
 	require.NoError(t, i.Start())
-	assert.NotEqual(t, ":0", i.Addr().String())
+	assert.NotEqual(t, "127.0.0.1:0", i.Addr().String())
 	assert.NotNil(t, i.Addr())
 	assert.NoError(t, i.Stop())
 	assert.Nil(t, i.Addr())
@@ -85,10 +85,10 @@ func TestNilAddrAfterStop(t *testing.T) {
 
 func TestInboundStartAndStop(t *testing.T) {
 	x := NewTransport()
-	i := x.NewInbound(":0")
+	i := x.NewInbound("127.0.0.1:0")
 	i.SetRouter(newTestRouter(nil))
 	require.NoError(t, i.Start())
-	assert.NotEqual(t, ":0", i.Addr().String())
+	assert.NotEqual(t, "127.0.0.1:0", i.Addr().String())
 	assert.NoError(t, i.Stop())
 }
 
@@ -96,20 +96,19 @@ func TestInboundStartError(t *testing.T) {
 	x := NewTransport()
 	i := x.NewInbound("invalid")
 	i.SetRouter(new(transporttest.MockRouter))
-	err := i.Start()
-	assert.Error(t, err, "expected failure")
+	assert.Error(t, i.Start(), "expected failure")
 }
 
 func TestInboundStartErrorBadGrabHeader(t *testing.T) {
 	x := NewTransport()
-	i := x.NewInbound(":0", GrabHeaders("x-valid", "y-invalid"))
+	i := x.NewInbound("127.0.0.1:0", GrabHeaders("x-valid", "y-invalid"))
 	i.SetRouter(new(transporttest.MockRouter))
 	assert.Equal(t, yarpcerrors.CodeInvalidArgument, yarpcerrors.FromError(i.Start()).Code())
 }
 
 func TestInboundStopWithoutStarting(t *testing.T) {
 	x := NewTransport()
-	i := x.NewInbound(":8000")
+	i := x.NewInbound("127.0.0.1:8000")
 	assert.Nil(t, i.Addr())
 	assert.NoError(t, i.Stop())
 }
@@ -119,6 +118,7 @@ func TestInboundMux(t *testing.T) {
 	defer mockCtrl.Finish()
 
 	httpTransport := NewTransport()
+	defer httpTransport.Stop()
 	// TODO transport lifecycle
 
 	mux := http.NewServeMux()
@@ -126,7 +126,7 @@ func TestInboundMux(t *testing.T) {
 		w.Write([]byte("healthy"))
 	})
 
-	i := httpTransport.NewInbound(":0", Mux("/rpc/v1", mux))
+	i := httpTransport.NewInbound("127.0.0.1:0", Mux("/rpc/v1", mux))
 	h := transporttest.NewMockUnaryHandler(mockCtrl)
 	reg := transporttest.NewMockRouter(mockCtrl)
 	reg.EXPECT().Procedures()

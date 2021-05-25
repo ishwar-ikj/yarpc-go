@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/yarpc"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/encoding/protobuf"
@@ -53,18 +54,16 @@ func TestIntegration(t *testing.T) {
 func testIntegrationForTransportType(t *testing.T, transportType testutils.TransportType) {
 	expectedStreamingHeaders := transport.NewHeaders().With("firstTestKey", "firstTestValue")
 	keyValueYARPCServer := example.NewKeyValueYARPCServer()
-	sinkYARPCServer := example.NewSinkYARPCServer(true)
 	fooYARPCServer := example.NewFooYARPCServer(expectedStreamingHeaders)
 	assert.NoError(
 		t,
 		exampleutil.WithClients(
 			transportType,
 			keyValueYARPCServer,
-			sinkYARPCServer,
 			fooYARPCServer,
 			nil,
 			func(clients *exampleutil.Clients) error {
-				testIntegration(t, transportType, clients, keyValueYARPCServer, sinkYARPCServer, expectedStreamingHeaders)
+				testIntegration(t, transportType, clients, keyValueYARPCServer, expectedStreamingHeaders)
 				return nil
 			},
 		),
@@ -76,7 +75,6 @@ func testIntegration(
 	ttype testutils.TransportType,
 	clients *exampleutil.Clients,
 	keyValueYARPCServer *example.KeyValueYARPCServer,
-	sinkYARPCServer *example.SinkYARPCServer,
 	expectedStreamingHeaders transport.Headers,
 ) {
 	keyValueYARPCServer.SetNextError(intyarpcerrors.NewWithNamef(yarpcerrors.CodeUnknown, "foo-bar", "baz"))
@@ -89,8 +87,10 @@ func testIntegration(
 	if ttype != testutils.TransportTypeTChannel {
 		keyValueYARPCServer.SetNextError(protobuf.NewError(yarpcerrors.CodeInternal, "foo-bar", protobuf.WithErrorDetails(&examplepb.EchoBothRequest{})))
 		err = setValue(clients.KeyValueYARPCClient, "foo", "bar")
-		assert.Equal(t, protobuf.NewError(yarpcerrors.CodeInternal, "foo-bar", protobuf.WithErrorDetails(&examplepb.EchoBothRequest{})), err)
-		assert.Equal(t, []interface{}{&examplepb.EchoBothRequest{}}, protobuf.GetErrorDetails(err))
+		require.Len(t, protobuf.GetErrorDetails(err), 1)
+		assert.Equal(t, protobuf.GetErrorDetails(err)[0], &examplepb.EchoBothRequest{})
+		assert.Equal(t, yarpcerrors.FromError(err).Code(), yarpcerrors.CodeInternal)
+		assert.Equal(t, yarpcerrors.FromError(err).Message(), "foo-bar")
 
 		keyValueYARPCServer.SetNextError(protobuf.NewError(yarpcerrors.CodeInternal, "hello world"))
 		err = setValue(clients.KeyValueYARPCClient, "foo", "bar")
@@ -139,14 +139,6 @@ func testIntegration(
 	value, err = getValue(clients.KeyValueYARPCClient, "baz")
 	assert.NoError(t, err)
 	assert.Equal(t, "bat", value)
-
-	assert.NoError(t, fire(clients.SinkYARPCClient, "foo"))
-	assert.NoError(t, sinkYARPCServer.WaitFireDone())
-	assert.NoError(t, fire(clients.SinkYARPCClient, "bar"))
-	assert.NoError(t, sinkYARPCServer.WaitFireDone())
-	assert.NoError(t, fire(clients.SinkYARPCJSONClient, "baz"))
-	assert.NoError(t, sinkYARPCServer.WaitFireDone())
-	assert.Equal(t, []string{"foo", "bar", "baz"}, sinkYARPCServer.Values())
 
 	contextWrapper := clients.ContextWrapper
 	streamOptions := make([]yarpc.CallOption, 0, expectedStreamingHeaders.Len())
@@ -212,13 +204,6 @@ func setValueGRPC(keyValueGRPCClient examplepb.KeyValueClient, contextWrapper *g
 	ctx, cancel := context.WithTimeout(context.Background(), testtime.Second)
 	defer cancel()
 	_, err := keyValueGRPCClient.SetValue(contextWrapper.Wrap(ctx), &examplepb.SetValueRequest{Key: key, Value: value})
-	return err
-}
-
-func fire(sinkYARPCClient examplepb.SinkYARPCClient, value string, options ...yarpc.CallOption) error {
-	ctx, cancel := context.WithTimeout(context.Background(), testtime.Second)
-	defer cancel()
-	_, err := sinkYARPCClient.Fire(ctx, &examplepb.FireRequest{Value: value}, options...)
 	return err
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -38,7 +38,7 @@ import (
 	"go.uber.org/yarpc/transport/grpc"
 	"go.uber.org/yarpc/transport/http"
 	"go.uber.org/yarpc/transport/tchannel"
-	"go.uber.org/yarpc/x/yarpcmeta"
+	"go.uber.org/zap"
 )
 
 var (
@@ -80,12 +80,15 @@ func do() error {
 	if err := flagSet.Parse(os.Args[1:]); err != nil {
 		return err
 	}
+
+	logger := zap.NewExample()
+
 	var inbound transport.Inbound
 	switch strings.ToLower(*flagInbound) {
 	case "http":
-		inbound = http.NewTransport().NewInbound("127.0.0.1:24042")
+		inbound = http.NewTransport(http.Logger(logger)).NewInbound("127.0.0.1:24042")
 		go func() {
-			if err := gohttp.ListenAndServe(":3242", nil); err != nil {
+			if err := gohttp.ListenAndServe("127.0.0.1:3242", nil); err != nil {
 				log.Fatal(err)
 			}
 		}()
@@ -93,13 +96,14 @@ func do() error {
 		tchannelTransport, err := tchannel.NewChannelTransport(
 			tchannel.ServiceName("keyvalue"),
 			tchannel.ListenAddr("127.0.0.1:28945"),
+			tchannel.Logger(logger),
 		)
 		if err != nil {
 			return err
 		}
 		inbound = tchannelTransport.NewInbound()
 		go func() {
-			if err := gohttp.ListenAndServe(":3243", nil); err != nil {
+			if err := gohttp.ListenAndServe("127.0.0.1:3243", nil); err != nil {
 				log.Fatal(err)
 			}
 		}()
@@ -108,9 +112,9 @@ func do() error {
 		if err != nil {
 			return err
 		}
-		inbound = grpc.NewTransport().NewInbound(listener)
+		inbound = grpc.NewTransport(grpc.Logger(logger)).NewInbound(listener)
 		go func() {
-			if err := gohttp.ListenAndServe(":3244", nil); err != nil {
+			if err := gohttp.ListenAndServe("127.0.0.1:3244", nil); err != nil {
 				log.Fatal(err)
 			}
 		}()
@@ -121,12 +125,13 @@ func do() error {
 	dispatcher := yarpc.NewDispatcher(yarpc.Config{
 		Name:     "keyvalue",
 		Inbounds: yarpc.Inbounds{inbound},
+		Logging: yarpc.LoggingConfig{
+			Zap: logger,
+		},
 	})
 
 	handler := handler{items: make(map[string]string)}
 	dispatcher.Register(keyvalueserver.New(&handler))
-
-	yarpcmeta.Register(dispatcher)
 
 	if err := dispatcher.Start(); err != nil {
 		return err

@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,7 @@ import (
 
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/api/transport"
-	"go.uber.org/yarpc/internal/introspection"
+	"go.uber.org/yarpc/api/x/introspection"
 	"go.uber.org/yarpc/peer/abstractlist"
 	"go.uber.org/zap"
 )
@@ -115,9 +115,7 @@ func New(transport peer.Transport, opts ...ListOption) *List {
 		list: abstractlist.New(
 			"fewest-pending-requests",
 			transport,
-			&pendingHeap{
-				nextRand: nextRandFn,
-			},
+			newHeap(nextRandFn),
 			plOpts...,
 		),
 	}

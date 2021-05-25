@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,8 +33,8 @@ const serverTemplate = `
 <$pkgname := printf "%sserver" (lower .Name)>
 package <$pkgname>
 
-<$thrift    := import "go.uber.org/yarpc/encoding/thrift">
-<$transport := import "go.uber.org/yarpc/api/transport">
+<$thrift      := import "go.uber.org/yarpc/encoding/thrift">
+<$transport   := import "go.uber.org/yarpc/api/transport">
 
 <$contextImportPath   := .ContextImportPath>
 <$onewayWrapperImport := .OnewayWrapperImport>
@@ -110,7 +110,15 @@ func New(impl Interface, opts ...<$thrift>.RegisterOption) []<$transport>.Proced
 	return procedures
 }
 
+<if .Functions>
 type handler struct{ impl Interface }
+
+<$yarpcerrors := import "go.uber.org/yarpc/yarpcerrors">
+
+type yarpcErrorNamer interface { YARPCErrorName() string }
+
+type yarpcErrorCoder interface { YARPCErrorCode() *yarpcerrors.Code }
+<end>
 
 <$service := .>
 <$module := .Module>
@@ -130,33 +138,45 @@ func (h handler) <.Name>(ctx <$context>.Context, body <$wire>.Value) error {
 	return h.impl.<.Name>(ctx, <range .Arguments>args.<.Name>,<end>)
 }
 <else>
+<$yarpcerrors := import "go.uber.org/yarpc/yarpcerrors">
 func (h handler) <.Name>(ctx <$context>.Context, body <$wire>.Value) (<$thrift>.Response, error) {
 	var args <$prefix>Args
 	if err := args.FromWire(body); err != nil {
-		return <$thrift>.Response{}, err
+		return <$thrift>.Response{}, <$yarpcerrors>.InvalidArgumentErrorf(
+			"could not decode Thrift request for service '<$service.Name>' procedure '<.Name>': %w", err)
 	}
 
 	<if .ReturnType>
-		success, err := h.impl.<.Name>(ctx, <range .Arguments>args.<.Name>,<end>)
+		success, appErr := h.impl.<.Name>(ctx, <range .Arguments>args.<.Name>,<end>)
 	<else>
-		err := h.impl.<.Name>(ctx, <range .Arguments>args.<.Name>,<end>)
+		appErr := h.impl.<.Name>(ctx, <range .Arguments>args.<.Name>,<end>)
 	<end>
 
-	hadError := err != nil
-	result, err := <$prefix>Helper.WrapResponse(<if .ReturnType>success,<end> err)
+	hadError := appErr != nil
+	result, err := <$prefix>Helper.WrapResponse(<if .ReturnType>success,<end> appErr)
 
 	var response <$thrift>.Response
 	if err == nil {
 		response.IsApplicationError = hadError
 		response.Body = result
+		if namer, ok := appErr.(yarpcErrorNamer); ok {
+			response.ApplicationErrorName = namer.YARPCErrorName()
+ 		}
+		if extractor, ok := appErr.(yarpcErrorCoder); ok {
+			response.ApplicationErrorCode = extractor.YARPCErrorCode()
+		}
+		if appErr != nil {
+			response.ApplicationErrorDetails = appErr.Error()
+		}
 	}
+
 	return response, err
 }
 <end>
 <end>
 `
 
-func serverGenerator(data *templateData, files map[string][]byte) (err error) {
+func serverGenerator(data *serviceTemplateData, files map[string][]byte) (err error) {
 	packageName := filepath.Base(data.ServerPackagePath())
 	// kv.thrift => .../kv/keyvalueserver/server.go
 	path := filepath.Join(data.Module.Directory, packageName, "server.go")

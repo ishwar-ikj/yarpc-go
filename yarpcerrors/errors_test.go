@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,7 @@
 package yarpcerrors
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -163,4 +164,145 @@ func testAllErrorConstructors(
 		})
 	}
 	t.Run("Named", namedFunc)
+}
+
+func TestErrUnwrap(t *testing.T) {
+	myErr := errors.New("my custom error")
+	yErr := AbortedErrorf("wrap my custom err: %w", myErr)
+
+	assert.Equal(t, FromError(yErr).Message(), "wrap my custom err: my custom error", "unexpected message")
+	assert.Equal(t, myErr, errors.Unwrap(yErr), "expected original error")
+	assert.Equal(t, myErr, errors.Unwrap(FromError(myErr)), "expected original error")
+	assert.True(t, errors.Is(yErr, myErr), "expected original error")
+}
+
+func TestErrUnwrapIs(t *testing.T) {
+	t.Run("FromError", func(t *testing.T) {
+		err := FromError(context.DeadlineExceeded)
+		assert.True(t, errors.Is(err, context.DeadlineExceeded), "errors be errors, yo")
+	})
+
+	t.Run("DeadlineExceededErrorf", func(t *testing.T) {
+		err := DeadlineExceededErrorf("Past due: %w", context.DeadlineExceeded)
+		assert.True(t, errors.Is(err, context.DeadlineExceeded), "errors be errors, yo")
+	})
+}
+
+func TestErrUnwrapNewf(t *testing.T) {
+	t.Run("no format", func(t *testing.T) {
+		err := Newf(CodeAborted, "not going to do it")
+		assert.NoError(t, errors.Unwrap(err))
+	})
+
+	t.Run("formatted with v verb", func(t *testing.T) {
+		origErr := errors.New("something broke")
+		err := Newf(CodeAborted, "not going to do it: %v", origErr)
+		assert.NoError(t, errors.Unwrap(err)) // %v hides the inner error
+	})
+
+	t.Run("wrapped with w verb", func(t *testing.T) {
+		origErr := errors.New("something broke")
+		err := Newf(CodeAborted, "not going to do it: %w", origErr)
+		assert.Equal(t, origErr, errors.Unwrap(err))
+	})
+}
+
+func TestErrUnwrapNil(t *testing.T) {
+	assert.NotPanics(t, func() {
+		var err *Status
+		errors.Unwrap(err)
+	})
+
+	assert.NotPanics(t, func() {
+		err := &Status{}
+		errors.Unwrap(err)
+	})
+}
+
+type customYARPCError struct {
+	err string
+}
+
+func (e customYARPCError) Error() string {
+	return e.err
+}
+func (e customYARPCError) YARPCError() *Status {
+	return FromError(DataLossErrorf(e.err))
+}
+
+func TestFromError(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		assert.Nil(t, FromError(nil))
+	})
+
+	t.Run("unknown err", func(t *testing.T) {
+		st := FromError(errors.New("foo"))
+		assert.Equal(t, CodeUnknown.String(), st.Code().String(), "unexpected code")
+	})
+
+	t.Run("wrapped Status", func(t *testing.T) {
+		wrappedErr := fmt.Errorf("wrap 2: %w",
+			FailedPreconditionErrorf("wrap 1: %w", // yarpc error
+				errors.New("inner")))
+
+		st := FromError(wrappedErr)
+		assert.Equal(t, CodeFailedPrecondition.String(), st.Code().String(), "unexpected Code")
+		assert.Equal(t, "wrap 1: inner", st.Message())
+	})
+
+	t.Run("wrapped Status interface", func(t *testing.T) {
+		st := FromError(fmt.Errorf("wrapped: %w", customYARPCError{err: "custom err"}))
+		assert.Equal(t, CodeDataLoss.String(), st.Code().String(), "unexpected Code")
+		assert.Equal(t, "custom err", st.Message())
+	})
+}
+
+func TestIsStatus(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		assert.False(t, IsStatus(nil))
+	})
+
+	t.Run("unknown err", func(t *testing.T) {
+		err := errors.New("foo")
+		assert.False(t, IsStatus(err), "unexpected Status")
+	})
+
+	t.Run("wrapped Status", func(t *testing.T) {
+		err := fmt.Errorf("wrap 2: %w",
+			FailedPreconditionErrorf("wrap 1: %w", // yarpc error
+				errors.New("inner")))
+
+		assert.True(t, IsStatus(err), "expected YARPC error")
+	})
+
+	t.Run("wrapped Status interface", func(t *testing.T) {
+		err := fmt.Errorf("wrapped: %w", customYARPCError{err: "custom err"})
+		assert.True(t, IsStatus(err))
+	})
+}
+
+func TestErrorWithFmtVerbs(t *testing.T) {
+	err := errors.New(`http://foo%s: invalid URL escape "%s"`)
+	assert.EqualError(t, UnknownErrorf(err.Error()), FromError(err).Error())
+}
+
+func TestWrapError(t *testing.T) {
+	t.Run("nil", func(t *testing.T) {
+		var we *wrapError
+		assert.Empty(t, we.Error())
+		assert.NoError(t, errors.Unwrap(we))
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		we := &wrapError{}
+		assert.Empty(t, we.Error())
+		assert.NoError(t, errors.Unwrap(we))
+	})
+
+	t.Run("full", func(t *testing.T) {
+		inner := errors.New("i'm a little error")
+		we := &wrapError{err: inner}
+		assert.Equal(t, inner.Error(), we.Error())
+		assert.Equal(t, inner, errors.Unwrap(we))
+	})
 }

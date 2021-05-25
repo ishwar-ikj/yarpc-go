@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,6 @@ import (
 	"runtime/debug"
 
 	"go.uber.org/yarpc"
-
 	"go.uber.org/yarpc/internal/introspection"
 	"go.uber.org/zap"
 )
@@ -103,7 +102,7 @@ var (
 		</tr>
 		{{range .Procedures}}
 		<tr>
-			<td>{{.Name}}</td>
+			<td>{{.ProcedureName}}</td>
 			<td>{{.Encoding}}</td>
 			<td>{{.Signature}}</td>
 			<td>{{.RPCType}}</td>

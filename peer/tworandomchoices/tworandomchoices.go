@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,7 +22,10 @@ package tworandomchoices
 
 import (
 	"math/rand"
+	"sync"
+	"time"
 
+	"go.uber.org/atomic"
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/api/transport"
 	"go.uber.org/yarpc/peer/abstractlist"
@@ -31,6 +34,24 @@ import (
 type twoRandomChoicesList struct {
 	subscribers []*subscriber
 	random      *rand.Rand
+
+	m sync.RWMutex
+}
+
+// Option configures the peer list implementation constructor.
+type Option interface {
+	apply(*options)
+}
+
+type options struct{}
+
+// NewImplementation creates a new fewest pending heap
+// abstractlist.Implementation.
+//
+// Use this constructor instead of NewList, when wanting to do custom peer
+// connection management.
+func NewImplementation(opts ...Option) abstractlist.Implementation {
+	return newTwoRandomChoicesList(10, rand.NewSource(time.Now().UnixNano()))
 }
 
 func newTwoRandomChoicesList(cap int, source rand.Source) *twoRandomChoicesList {
@@ -40,9 +61,10 @@ func newTwoRandomChoicesList(cap int, source rand.Source) *twoRandomChoicesList 
 	}
 }
 
-var _ abstractlist.Implementation = (*twoRandomChoicesList)(nil)
-
 func (l *twoRandomChoicesList) Add(peer peer.StatusPeer, _ peer.Identifier) abstractlist.Subscriber {
+	l.m.Lock()
+	defer l.m.Unlock()
+
 	index := len(l.subscribers)
 	l.subscribers = append(l.subscribers, &subscriber{
 		index: index,
@@ -52,6 +74,9 @@ func (l *twoRandomChoicesList) Add(peer peer.StatusPeer, _ peer.Identifier) abst
 }
 
 func (l *twoRandomChoicesList) Remove(peer peer.StatusPeer, _ peer.Identifier, ps abstractlist.Subscriber) {
+	l.m.Lock()
+	defer l.m.Unlock()
+
 	sub, ok := ps.(*subscriber)
 	if !ok || len(l.subscribers) == 0 {
 		return
@@ -64,6 +89,11 @@ func (l *twoRandomChoicesList) Remove(peer peer.StatusPeer, _ peer.Identifier, p
 }
 
 func (l *twoRandomChoicesList) Choose(_ *transport.Request) peer.StatusPeer {
+	// Usage of a wite lock because r.random.Intn is not thread safe
+	// see: https://golang.org/pkg/math/rand/
+	l.m.Lock()
+	defer l.m.Unlock()
+
 	numSubs := len(l.subscribers)
 	if numSubs == 0 {
 		return nil
@@ -76,24 +106,20 @@ func (l *twoRandomChoicesList) Choose(_ *transport.Request) peer.StatusPeer {
 	if j >= numSubs {
 		j -= numSubs
 	}
-	if l.pending(i) > l.pending(j) {
+	if l.subscribers[i].pending.Load() > l.subscribers[j].pending.Load() {
 		i = j
 	}
 	return l.subscribers[i].peer
 }
 
-func (l *twoRandomChoicesList) pending(index int) int {
-	return l.subscribers[index].pending
-}
-
 type subscriber struct {
 	index   int
 	peer    peer.StatusPeer
-	pending int
+	pending atomic.Int32
 }
 
 var _ abstractlist.Subscriber = (*subscriber)(nil)
 
 func (s *subscriber) UpdatePendingRequestCount(pendingRequestCount int) {
-	s.pending = pendingRequestCount
+	s.pending.Store(int32(pendingRequestCount))
 }

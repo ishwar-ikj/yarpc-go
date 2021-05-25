@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -35,9 +35,9 @@ const (
 	serverFault
 )
 
-// determine whether the status code is a client, server or indeterminate fault.
-func statusFault(status *yarpcerrors.Status) fault {
-	switch status.Code() {
+// determine whether the status code is a client, server or indeterminate fault based on a YARPC Code.
+func faultFromCode(code yarpcerrors.Code) fault {
+	switch code {
 	case yarpcerrors.CodeCancelled,
 		yarpcerrors.CodeInvalidArgument,
 		yarpcerrors.CodeNotFound,
@@ -47,6 +47,7 @@ func statusFault(status *yarpcerrors.Status) fault {
 		yarpcerrors.CodeAborted,
 		yarpcerrors.CodeOutOfRange,
 		yarpcerrors.CodeUnauthenticated,
+		yarpcerrors.CodeUnimplemented,
 		yarpcerrors.CodeResourceExhausted:
 		return clientFault
 
@@ -54,8 +55,7 @@ func statusFault(status *yarpcerrors.Status) fault {
 		yarpcerrors.CodeDeadlineExceeded,
 		yarpcerrors.CodeInternal,
 		yarpcerrors.CodeUnavailable,
-		yarpcerrors.CodeDataLoss,
-		yarpcerrors.CodeUnimplemented:
+		yarpcerrors.CodeDataLoss:
 		return serverFault
 	}
 

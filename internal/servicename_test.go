@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,6 +33,7 @@ func TestValidServiceNames(t *testing.T) {
 		"supper-skipper",
 		"supperskipper83",
 		"supper-skipper83",
+		"supper_skipper83",
 		"a77ab7g4-51cb-4808-a9ef-875568bde54a", // not valid UUID
 		"eviluuid26695g10-a384-48e7-8867-6d48b7fae80a", // not valid UUID
 		"a77gb7e4-51cb-4808-a9ef-875568bde54aeviluuid", // not valid UUID
@@ -53,7 +54,6 @@ func TestInvalidServiceNames(t *testing.T) {
 		"26695g10-a384-48e7-8867-6d48b7fae80a", // not valid UUID, but starts with a number.
 		"superSkipper",
 		"SuperSkipper",
-		"super_skipper",
 		"083superskipper",
 		"茶",
 		"super skipper",
@@ -62,6 +62,7 @@ func TestInvalidServiceNames(t *testing.T) {
 		"",
 		"    ",
 		"-",
+		"_",
 		"no--duplication",
 		"no---duplication",
 		"endswithadash-",

@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -70,6 +70,35 @@ func TestToYARPCError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			gotErr := toYARPCError(tt.giveReq, tt.giveErr)
 			assert.Equal(t, tt.wantErr, gotErr)
+		})
+	}
+}
+
+func TestGetResponseErrorMeta(t *testing.T) {
+	tests := []struct {
+		name string
+		give error
+		want *ResponseErrorMeta
+	}{
+		{
+			name: "nil",
+		},
+		{
+			name: "wrong error",
+			give: errors.New("not a yarpc/tchannel error"),
+		},
+		{
+			name: "success",
+			give: fromSystemError(tchannel.NewSystemError(tchannel.ErrCodeProtocol, "foo bar").(tchannel.SystemError)),
+			want: &ResponseErrorMeta{
+				Code: tchannel.ErrCodeProtocol,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, GetResponseErrorMeta(tt.give), "unexpected")
 		})
 	}
 }

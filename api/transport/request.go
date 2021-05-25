@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -64,8 +64,17 @@ type Request struct {
 	// override the routing key and service.
 	RoutingDelegate string
 
+	// CallerProcedure refers to the name of the rpc procedure from the service making this request.
+	CallerProcedure string
+
 	// Request payload.
 	Body io.Reader
+
+	// Request payload size before any compression applied by the protocol
+	// When using the HTTP transport, this value is set from the HTTP header
+	// content-length. It should be noted that this value is set manually and
+	// will not be updated automatically if the body is being modified
+	BodySize int
 }
 
 // ToRequestMeta converts a Request into a RequestMeta.
@@ -80,6 +89,7 @@ func (r *Request) ToRequestMeta() *RequestMeta {
 		ShardKey:        r.ShardKey,
 		RoutingKey:      r.RoutingKey,
 		RoutingDelegate: r.RoutingDelegate,
+		CallerProcedure: r.CallerProcedure,
 	}
 }
 
@@ -94,6 +104,7 @@ func (r *Request) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("shardKey", r.ShardKey)
 	enc.AddString("routingKey", r.RoutingKey)
 	enc.AddString("routingDelegate", r.RoutingDelegate)
+	enc.AddString("callerProcedure", r.CallerProcedure)
 	return nil
 }
 
@@ -184,6 +195,9 @@ type RequestMeta struct {
 	// for the destined service for routing purposes. The routing delegate may
 	// override the routing key and service.
 	RoutingDelegate string
+
+	// CallerProcedure refers to the name of the rpc procedure of the service making this request.
+	CallerProcedure string
 }
 
 // ToRequest converts a RequestMeta into a Request.
@@ -201,5 +215,6 @@ func (r *RequestMeta) ToRequest() *Request {
 		ShardKey:        r.ShardKey,
 		RoutingKey:      r.RoutingKey,
 		RoutingDelegate: r.RoutingDelegate,
+		CallerProcedure: r.CallerProcedure,
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -136,6 +136,7 @@ func TestRequestLogMarshaling(t *testing.T) {
 		ShardKey:        "shard01",
 		RoutingKey:      "routing-key",
 		RoutingDelegate: "routing-delegate",
+		CallerProcedure: "caller-procedure",
 		Body:            strings.NewReader("body"),
 	}
 	enc := zapcore.NewMapObjectEncoder()
@@ -149,6 +150,7 @@ func TestRequestLogMarshaling(t *testing.T) {
 		"shardKey":        "shard01",
 		"routingKey":      "routing-key",
 		"routingDelegate": "routing-delegate",
+		"callerProcedure": "caller-procedure",
 	}, enc.Fields, "Unexpected output after marshaling request.")
 }
 
@@ -163,6 +165,7 @@ func TestRequestMetaToRequestConversionAndBack(t *testing.T) {
 		ShardKey:        "shard",
 		RoutingKey:      "rk",
 		RoutingDelegate: "rd",
+		CallerProcedure: "cp",
 	}
 
 	req := reqMeta.ToRequest()

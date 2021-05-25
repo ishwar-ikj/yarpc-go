@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -62,6 +62,7 @@ func TestCallFromContext(t *testing.T) {
 			ShardKey:        "one",
 			RoutingKey:      "two",
 			RoutingDelegate: "three",
+			CallerProcedure: "four",
 		},
 	)
 	assert.NoError(t, err)
@@ -76,4 +77,5 @@ func TestCallFromContext(t *testing.T) {
 	assert.Equal(t, "one", call.ShardKey())
 	assert.Equal(t, "two", call.RoutingKey())
 	assert.Equal(t, "three", call.RoutingDelegate())
+	assert.Equal(t, "four", call.CallerProcedure())
 }

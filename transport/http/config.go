@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -67,7 +67,7 @@ type transportSpec struct {
 
 func (ts *transportSpec) Spec() yarpcconfig.TransportSpec {
 	return yarpcconfig.TransportSpec{
-		Name:                transportName,
+		Name:                TransportName,
 		BuildTransport:      ts.buildTransport,
 		BuildInbound:        ts.buildInbound,
 		BuildUnaryOutbound:  ts.buildUnaryOutbound,
@@ -83,6 +83,7 @@ func (ts *transportSpec) Spec() yarpcconfig.TransportSpec {
 //      keepAlive: 30s
 //      maxIdleConns: 2
 //      maxIdleConnsPerHost: 2
+//      idleConnTimeout: 90s
 //      disableKeepAlives: false
 //      disableCompression: false
 //      responseHeaderTimeout: 0s
@@ -123,6 +124,9 @@ func (ts *transportSpec) buildTransport(tc *TransportConfig, k *yarpcconfig.Kit)
 	}
 	if tc.MaxIdleConnsPerHost > 0 {
 		options.maxIdleConnsPerHost = tc.MaxIdleConnsPerHost
+	}
+	if tc.IdleConnTimeout > 0 {
+		options.idleConnTimeout = tc.IdleConnTimeout
 	}
 	if tc.DisableKeepAlives {
 		options.disableKeepAlives = true

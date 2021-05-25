@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -53,7 +53,9 @@ func newHandler(i *Inbound, l *zap.Logger) *handler {
 	return &handler{i: i, logger: l}
 }
 
-func (h *handler) handle(srv interface{}, serverStream grpc.ServerStream) error {
+func (h *handler) handle(srv interface{}, serverStream grpc.ServerStream) (err error) {
+	defer func() { err = toGRPCError(err) }()
+
 	start := time.Now()
 	ctx := serverStream.Context()
 	streamMethod, ok := grpc.MethodFromServerStream(serverStream)
@@ -74,7 +76,7 @@ func (h *handler) handle(srv interface{}, serverStream grpc.ServerStream) error 
 	case transport.Unary:
 		return h.handleUnary(ctx, transportRequest, serverStream, streamMethod, start, handlerSpec.Unary())
 	case transport.Streaming:
-		return toGRPCStreamError(h.handleStream(ctx, transportRequest, serverStream, start, handlerSpec.Stream()))
+		return h.handleStream(ctx, transportRequest, serverStream, start, handlerSpec.Stream())
 	}
 	return yarpcerrors.Newf(yarpcerrors.CodeUnimplemented, "transport grpc does not handle %s handlers", handlerSpec.Type().String())
 }
@@ -90,7 +92,7 @@ func (h *handler) getBasicTransportRequest(ctx context.Context, streamMethod str
 	if err != nil {
 		return nil, err
 	}
-	transportRequest.Transport = transportName
+	transportRequest.Transport = TransportName
 
 	procedure, err := procedureFromStreamMethod(streamMethod)
 	if err != nil {
@@ -137,7 +139,7 @@ func (h *handler) handleStream(
 	extractOpenTracingSpan := &transport.ExtractOpenTracingSpan{
 		ParentSpanContext: parentSpanCtx,
 		Tracer:            tracer,
-		TransportName:     transportName,
+		TransportName:     TransportName,
 		StartTime:         start,
 		ExtraTags:         yarpc.OpentracingTags,
 	}
@@ -149,12 +151,13 @@ func (h *handler) handleStream(
 	if err != nil {
 		return err
 	}
-
-	return transport.UpdateSpanWithErr(span, transport.InvokeStreamHandler(transport.StreamInvokeRequest{
+	apperr := transport.InvokeStreamHandler(transport.StreamInvokeRequest{
 		Stream:  tServerStream,
 		Handler: streamHandler,
 		Logger:  h.logger,
-	}))
+	})
+	apperr = handlerErrorToGRPCError(apperr, nil)
+	return transport.UpdateSpanWithErr(span, apperr)
 }
 
 func (h *handler) handleUnary(
@@ -169,12 +172,14 @@ func (h *handler) handleUnary(
 	if err := serverStream.RecvMsg(&requestData); err != nil {
 		return err
 	}
+	// TODO: avoid redundant buffer copy
 	requestBuffer := bufferpool.Get()
 	defer bufferpool.Put(requestBuffer)
 
 	// Buffers are documented to always return a nil error.
 	_, _ = requestBuffer.Write(requestData)
 	transportRequest.Body = requestBuffer
+	transportRequest.BodySize = len(requestData)
 
 	responseWriter := newResponseWriter()
 	defer responseWriter.Close()
@@ -217,7 +222,7 @@ func (h *handler) handleUnaryBeforeErrorConversion(
 	extractOpenTracingSpan := &transport.ExtractOpenTracingSpan{
 		ParentSpanContext: parentSpanCtx,
 		Tracer:            tracer,
-		TransportName:     transportName,
+		TransportName:     TransportName,
 		StartTime:         start,
 		ExtraTags:         yarpc.OpentracingTags,
 	}
@@ -242,6 +247,11 @@ func (h *handler) callUnary(ctx context.Context, transportRequest *transport.Req
 	})
 }
 
+// handlerErrorToGRPCError converts a yarpcerror to gRPC status error,
+// taking into account error details.
+//
+// This method is used from unary and stream handlers. Stream handler passes
+// nil responseWriter
 func handlerErrorToGRPCError(err error, responseWriter *responseWriter) error {
 	if err == nil {
 		return nil
@@ -261,7 +271,9 @@ func handlerErrorToGRPCError(err error, responseWriter *responseWriter) error {
 	message := yarpcStatus.Message()
 	// if the yarpc error has a name, set the header
 	if name != "" {
-		responseWriter.AddSystemHeader(ErrorNameHeader, name)
+		if responseWriter != nil {
+			responseWriter.AddSystemHeader(ErrorNameHeader, name)
+		}
 		if message == "" {
 			// if the message is empty, set the message to the name for grpc compatibility
 			message = name
@@ -276,6 +288,32 @@ func handlerErrorToGRPCError(err error, responseWriter *responseWriter) error {
 		return unmarshalError(body)
 	}
 
+	grpcCode, ok := grpcerrorcodes.YARPCCodeToGRPCCode[yarpcStatus.Code()]
+	// should only happen if grpcerrorcodes.YARPCCodeToGRPCCode does not cover all codes
+	if !ok {
+		grpcCode = codes.Unknown
+	}
+	return status.Error(grpcCode, message)
+}
+
+// toGRPCError converts errors to gRPC status errors. gRPC status errors are
+// returned as is.
+//
+// This MUST NOT be used for coverting YARPC error details to gRPC error
+// details. Use toGRPCErrorWithDetails instead.
+func toGRPCError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// if this is not a yarpc error, return the error
+	// this will result in the error being a grpc-go error with codes.Unknown
+	if !yarpcerrors.IsStatus(err) {
+		return err
+	}
+	// we now know we have a yarpc error
+	yarpcStatus := yarpcerrors.FromError(err)
+	message := yarpcStatus.Message()
 	grpcCode, ok := grpcerrorcodes.YARPCCodeToGRPCCode[yarpcStatus.Code()]
 	// should only happen if grpcerrorcodes.YARPCCodeToGRPCCode does not cover all codes
 	if !ok {

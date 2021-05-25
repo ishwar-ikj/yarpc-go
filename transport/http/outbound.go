@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +37,7 @@ import (
 	"go.uber.org/yarpc"
 	"go.uber.org/yarpc/api/peer"
 	"go.uber.org/yarpc/api/transport"
-	"go.uber.org/yarpc/internal/introspection"
+	"go.uber.org/yarpc/api/x/introspection"
 	intyarpcerrors "go.uber.org/yarpc/internal/yarpcerrors"
 	peerchooser "go.uber.org/yarpc/peer"
 	"go.uber.org/yarpc/peer/hostport"
@@ -46,6 +47,7 @@ import (
 
 // this ensures the HTTP outbound implements both transport.Outbound interfaces
 var (
+	_ transport.Namer                      = (*Outbound)(nil)
 	_ transport.UnaryOutbound              = (*Outbound)(nil)
 	_ transport.OnewayOutbound             = (*Outbound)(nil)
 	_ introspection.IntrospectableOutbound = (*Outbound)(nil)
@@ -168,6 +170,11 @@ type Outbound struct {
 	bothResponseError bool
 }
 
+// TransportName is the transport name that will be set on `transport.Request` struct.
+func (o *Outbound) TransportName() string {
+	return TransportName
+}
+
 // setURLTemplate configures an alternate URL template.
 // The host:port portion of the URL template gets replaced by the chosen peer's
 // identifier for each outbound request.
@@ -219,9 +226,15 @@ func (o *Outbound) CallOneway(ctx context.Context, treq *transport.Request) (tra
 		return nil, yarpcerrors.InvalidArgumentErrorf("request for http oneway outbound was nil")
 	}
 
-	_, err := o.call(ctx, treq)
+	// res is used to close the response body to avoid memory/connection leak
+	// even when the response body is empty
+	res, err := o.call(ctx, treq)
 	if err != nil {
 		return nil, err
+	}
+
+	if err = res.Body.Close(); err != nil {
+		return nil, yarpcerrors.Newf(yarpcerrors.CodeInternal, err.Error())
 	}
 
 	return time.Now(), nil
@@ -239,7 +252,6 @@ func (o *Outbound) call(ctx context.Context, treq *transport.Request) (*transpor
 	if err != nil {
 		return nil, err
 	}
-	hreq.Header = applicationHeaders.ToHTTPHeaders(treq.Headers, nil)
 	ctx, hreq, span, err := o.withOpentracingSpan(ctx, hreq, treq, start)
 	if err != nil {
 		return nil, err
@@ -260,6 +272,9 @@ func (o *Outbound) call(ctx context.Context, treq *transport.Request) (*transpor
 
 	// Service name match validation, return yarpcerrors.CodeInternal error if not match
 	if match, resSvcName := checkServiceMatch(treq.Service, response.Header); !match {
+		if err = response.Body.Close(); err != nil {
+			return nil, yarpcerrors.Newf(yarpcerrors.CodeInternal, err.Error())
+		}
 		return nil, transport.UpdateSpanWithErr(span,
 			yarpcerrors.InternalErrorf("service name sent from the request "+
 				"does not match the service name received in the response, sent %q, got: %q", treq.Service, resSvcName))
@@ -268,7 +283,13 @@ func (o *Outbound) call(ctx context.Context, treq *transport.Request) (*transpor
 	tres := &transport.Response{
 		Headers:          applicationHeaders.FromHTTPHeaders(response.Header, transport.NewHeaders()),
 		Body:             response.Body,
+		BodySize:         int(response.ContentLength),
 		ApplicationError: response.Header.Get(ApplicationStatusHeader) == ApplicationErrorStatus,
+		ApplicationErrorMeta: &transport.ApplicationErrorMeta{
+			Details: response.Header.Get(_applicationErrorDetailsHeader),
+			Name:    response.Header.Get(_applicationErrorNameHeader),
+			Code:    getYARPCApplicationErrorCode(response.Header.Get(_applicationErrorCodeHeader)),
+		},
 	}
 
 	bothResponseError := response.Header.Get(BothResponseErrorHeader) == AcceptTrue
@@ -282,6 +303,20 @@ func (o *Outbound) call(ctx context.Context, treq *transport.Request) (*transpor
 		return tres, nil
 	}
 	return getYARPCErrorFromResponse(tres, response, false)
+}
+
+func getYARPCApplicationErrorCode(code string) *yarpcerrors.Code {
+	if code == "" {
+		return nil
+	}
+
+	errorCode, err := strconv.Atoi(code)
+	if err != nil {
+		return nil
+	}
+
+	yarpcCode := yarpcerrors.Code(errorCode)
+	return &yarpcCode
 }
 
 func (o *Outbound) getPeerForRequest(ctx context.Context, treq *transport.Request) (*httpPeer, func(error), error) {
@@ -303,7 +338,12 @@ func (o *Outbound) getPeerForRequest(ctx context.Context, treq *transport.Reques
 
 func (o *Outbound) createRequest(treq *transport.Request) (*http.Request, error) {
 	newURL := *o.urlTemplate
-	return http.NewRequest("POST", newURL.String(), treq.Body)
+	hreq, err := http.NewRequest("POST", newURL.String(), treq.Body)
+	if err != nil {
+		return nil, err
+	}
+	hreq.Header = applicationHeaders.ToHTTPHeaders(treq.Headers, nil)
+	return hreq, err
 }
 
 func (o *Outbound) withOpentracingSpan(ctx context.Context, req *http.Request, treq *transport.Request, start time.Time) (context.Context, *http.Request, opentracing.Span, error) {
@@ -364,6 +404,9 @@ func (o *Outbound) withCoreHeaders(req *http.Request, treq *transport.Request, t
 	}
 	if treq.RoutingDelegate != "" {
 		req.Header.Set(RoutingDelegateHeader, treq.RoutingDelegate)
+	}
+	if treq.CallerProcedure != "" {
+		req.Header.Set(CallerProcedureHeader, treq.CallerProcedure)
 	}
 
 	encoding := string(treq.Encoding)
@@ -486,6 +529,7 @@ func (o *Outbound) roundTrip(hreq *http.Request, treq *transport.Request, start 
 			ShardKey:        hreq.Header.Get(ShardKeyHeader),
 			RoutingKey:      hreq.Header.Get(RoutingKeyHeader),
 			RoutingDelegate: hreq.Header.Get(RoutingDelegateHeader),
+			CallerProcedure: hreq.Header.Get(CallerProcedureHeader),
 			Headers:         applicationHeaders.FromHTTPHeaders(hreq.Header, transport.Headers{}),
 		}
 	}

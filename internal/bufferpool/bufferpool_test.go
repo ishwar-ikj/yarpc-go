@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2021 Uber Technologies, Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -90,6 +90,8 @@ func TestBufferReuse(t *testing.T) {
 	runTest(t, func(t *testing.T, pool *Pool) {
 		runConcurrently(t, func() {
 			buf := pool.Get()
+			assert.Equal(t, 0, len(buf.Bytes()), "Expected zero buffer size")
+
 			io.WriteString(buf, "test")
 			buf.Release()
 		})
