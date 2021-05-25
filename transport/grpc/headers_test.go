@@ -47,6 +47,7 @@ func TestMetadataToTransportRequest(t *testing.T) {
 				RoutingKeyHeader, "example-routing-key",
 				RoutingDelegateHeader, "example-routing-delegate",
 				EncodingHeader, "example-encoding",
+				CallerProcedureHeader, "example-caller-procedure",
 				"foo", "bar",
 				"baz", "bat",
 			),
@@ -57,6 +58,7 @@ func TestMetadataToTransportRequest(t *testing.T) {
 				RoutingKey:      "example-routing-key",
 				RoutingDelegate: "example-routing-delegate",
 				Encoding:        "example-encoding",
+				CallerProcedure: "example-caller-procedure",
 				Headers: transport.HeadersFromMap(map[string]string{
 					"foo": "bar",
 					"baz": "bat",
@@ -140,6 +142,7 @@ func TestTransportRequestToMetadata(t *testing.T) {
 				ShardKeyHeader, "example-shard-key",
 				RoutingKeyHeader, "example-routing-key",
 				RoutingDelegateHeader, "example-routing-delegate",
+				CallerProcedureHeader, "example-caller-procedure",
 				EncodingHeader, "example-encoding",
 				"foo", "bar",
 				"baz", "bat",
@@ -150,6 +153,7 @@ func TestTransportRequestToMetadata(t *testing.T) {
 				ShardKey:        "example-shard-key",
 				RoutingKey:      "example-routing-key",
 				RoutingDelegate: "example-routing-delegate",
+				CallerProcedure: "example-caller-procedure",
 				Encoding:        "example-encoding",
 				Headers: transport.HeadersFromMap(map[string]string{
 					"foo": "bar",
@@ -209,4 +213,58 @@ func TestMDReadWriterDuplicateKey(t *testing.T) {
 	mdRW := mdReadWriter(md)
 	mdRW.Set(key, "overwritten")
 	assert.Equal(t, []string{"overwritten"}, md[key], "expected overwritten values")
+}
+
+func TestGetApplicationHeaders(t *testing.T) {
+	tests := []struct {
+		msg         string
+		meta        metadata.MD
+		wantHeaders map[string]string
+		wantErr     string
+	}{
+		{
+			msg:         "nil",
+			meta:        nil,
+			wantHeaders: nil,
+		},
+		{
+			msg:         "empty",
+			meta:        metadata.MD{},
+			wantHeaders: nil,
+		},
+		{
+			msg: "success",
+			meta: metadata.MD{
+				"rpc-service":         []string{"foo"}, // reserved header
+				"test-header-empty":   []string{},      // no value
+				"test-header-valid-1": []string{"test-value-1"},
+				"test-Header-Valid-2": []string{"test-value-2"},
+			},
+			wantHeaders: map[string]string{
+				"test-header-valid-1": "test-value-1",
+				"test-header-valid-2": "test-value-2",
+			},
+		},
+		{
+			msg: "error: multiple values for one header",
+			meta: metadata.MD{
+				"test-header-valid": []string{"test-value"},
+				"test-header-dup":   []string{"test-value-1", "test-value-2"},
+			},
+			wantErr: "header has more than one value: test-header-dup:[test-value-1 test-value-2]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.msg, func(t *testing.T) {
+			got, err := getApplicationHeaders(tt.meta)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr, "unexpecte error message")
+				return
+			}
+			require.NoError(t, err, "failed to extract application headers")
+			assert.Equal(t, tt.wantHeaders, got.Items(), "unexpected headers")
+		})
+	}
 }

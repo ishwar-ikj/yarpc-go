@@ -35,6 +35,17 @@ type yarpcConfig struct {
 	Outbounds  clientConfigs                  `config:"outbounds"`
 	Transports map[string]config.AttributeMap `config:"transports"`
 	Logging    logging                        `config:"logging"`
+	Metrics    metrics                        `config:"metrics"`
+}
+
+// metrics allows configuring the way metrics are emitted from YAML
+type metrics struct {
+	TagsBlocklist []string `config:"tagsBlocklist"`
+}
+
+// Fills values from this object into the provided YARPC config.
+func (m *metrics) fill(cfg *yarpc.Config) {
+	cfg.Metrics.TagsBlocklist = m.TagsBlocklist
 }
 
 // logging allows configuring the log levels from YAML.
@@ -44,6 +55,8 @@ type logging struct {
 		Success          *zapLevel `config:"success"`
 		Failure          *zapLevel `config:"failure"`
 		ApplicationError *zapLevel `config:"applicationError"`
+		ServerError      *zapLevel `config:"serverError"`
+		ClientError      *zapLevel `config:"clientError"`
 
 		// Directional overrides.
 		Inbound  levels `config:"inbound"`
@@ -55,6 +68,8 @@ type levels struct {
 	Success          *zapLevel `config:"success"`
 	Failure          *zapLevel `config:"failure"`
 	ApplicationError *zapLevel `config:"applicationError"`
+	ServerError      *zapLevel `config:"serverError"`
+	ClientError      *zapLevel `config:"clientError"`
 }
 
 // Fills values from this object into the provided YARPC config.
@@ -62,6 +77,8 @@ func (l *logging) fill(cfg *yarpc.Config) {
 	cfg.Logging.Levels.Success = (*zapcore.Level)(l.Levels.Success)
 	cfg.Logging.Levels.Failure = (*zapcore.Level)(l.Levels.Failure)
 	cfg.Logging.Levels.ApplicationError = (*zapcore.Level)(l.Levels.ApplicationError)
+	cfg.Logging.Levels.ServerError = (*zapcore.Level)(l.Levels.ServerError)
+	cfg.Logging.Levels.ClientError = (*zapcore.Level)(l.Levels.ClientError)
 
 	l.Levels.Inbound.fill(&cfg.Logging.Levels.Inbound)
 	l.Levels.Outbound.fill(&cfg.Logging.Levels.Outbound)
@@ -71,6 +88,8 @@ func (l *levels) fill(cfg *yarpc.DirectionalLogLevelConfig) {
 	cfg.Success = (*zapcore.Level)(l.Success)
 	cfg.Failure = (*zapcore.Level)(l.Failure)
 	cfg.ApplicationError = (*zapcore.Level)(l.ApplicationError)
+	cfg.ServerError = (*zapcore.Level)(l.ServerError)
+	cfg.ClientError = (*zapcore.Level)(l.ClientError)
 }
 
 type zapLevel zapcore.Level

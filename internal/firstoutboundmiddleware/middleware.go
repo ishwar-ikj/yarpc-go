@@ -47,23 +47,23 @@ func New() *Middleware {
 
 // Call implements middleware.UnaryOutbound.
 func (m *Middleware) Call(ctx context.Context, req *transport.Request, next transport.UnaryOutbound) (*transport.Response, error) {
-	update(req, next)
+	update(ctx, req, next)
 	return next.Call(ctx, req)
 }
 
 // CallOneway implements middleware.OnewayOutbound.
 func (m *Middleware) CallOneway(ctx context.Context, req *transport.Request, next transport.OnewayOutbound) (transport.Ack, error) {
-	update(req, next)
+	update(ctx, req, next)
 	return next.CallOneway(ctx, req)
 }
 
 // CallStream implements middleware.StreamOutbound.
 func (m *Middleware) CallStream(ctx context.Context, req *transport.StreamRequest, next transport.StreamOutbound) (*transport.ClientStream, error) {
-	updateStream(req, next)
+	updateStream(ctx, req, next)
 	return next.CallStream(ctx, req)
 }
 
-func update(req *transport.Request, out transport.Outbound) {
+func update(ctx context.Context, req *transport.Request, out transport.Outbound) {
 	// TODO(apeatsbond): Setting environment headers and unique IDs should live
 	// here too (T1860945).
 
@@ -75,7 +75,7 @@ func update(req *transport.Request, out transport.Outbound) {
 	}
 }
 
-func updateStream(req *transport.StreamRequest, out transport.Outbound) {
+func updateStream(ctx context.Context, req *transport.StreamRequest, out transport.Outbound) {
 	// TODO(apeatsbond): Setting environment headers and unique IDs should live
 	// here too (T1860945).
 

@@ -33,6 +33,7 @@ import (
 	"go.uber.org/yarpc/yarpcconfig"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/keepalive"
 )
 
 func TestNewTransportSpecOptions(t *testing.T) {
@@ -102,6 +103,7 @@ func TestTransportSpec(t *testing.T) {
 		TLS                     bool
 		Compressor              string
 		WantCustomContextDialer bool
+		Keepalive               *keepalive.ClientParameters
 	}
 
 	type test struct {
@@ -294,6 +296,131 @@ func TestTransportSpec(t *testing.T) {
 				},
 			},
 		},
+		{
+			desc: "simple outbound with keepalive params",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{"address": "localhost:54569"},
+				},
+			},
+			opts: []Option{KeepaliveParams(keepalive.ClientParameters{
+				Timeout: time.Second * 10,
+				Time:    time.Second * 30,
+			})},
+			wantOutbounds: map[string]wantOutbound{
+				"myservice": {
+					Address: "localhost:54569",
+					Keepalive: &keepalive.ClientParameters{
+						Timeout: time.Second * 10,
+						Time:    time.Second * 30,
+					},
+				},
+			},
+		},
+		{
+			desc: "Outbound with keepalive from attrs",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{
+						"address": "localhost:54816",
+						"grpc-keepalive": attrs{
+							"enabled":               "true",
+							"time":                  "30s",
+							"timeout":               "20s",
+							"permit-without-stream": "true",
+						},
+					},
+				},
+			},
+			wantOutbounds: map[string]wantOutbound{
+				"myservice": {
+					Address: "localhost:54816",
+					Keepalive: &keepalive.ClientParameters{
+						Timeout:             time.Second * 20,
+						Time:                time.Second * 30,
+						PermitWithoutStream: true,
+					},
+				},
+			},
+		},
+		{
+			desc: "Outbound with keepalive defaults",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{
+						"address": "localhost:54816",
+						"grpc-keepalive": attrs{
+							"enabled": "true",
+						},
+					},
+				},
+			},
+			wantOutbounds: map[string]wantOutbound{
+				"myservice": {
+					Address: "localhost:54816",
+					Keepalive: &keepalive.ClientParameters{
+						Timeout: time.Second * 20,
+						Time:    time.Second * 10,
+					},
+				},
+			},
+		},
+		{
+			desc: "invalid keepalive time",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{
+						"address": "localhost:54816",
+						"grpc-keepalive": attrs{
+							"enabled": "true",
+							"time":    "10foo",
+							"timeout": "10",
+						},
+					},
+				},
+			},
+			wantErrors: []string{
+				`could not parse gRPC keepalive time: time: unknown unit`,
+			},
+		},
+		{
+			desc: "invalid keepalive timeout",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{
+						"address": "localhost:54816",
+						"grpc-keepalive": attrs{
+							"enabled": "true",
+							"time":    "10s",
+							"timeout": "10foo",
+						},
+					},
+				},
+			},
+			wantErrors: []string{
+				`could not parse gRPC keepalive timeout: time: unknown unit`,
+			},
+		},
+		{
+			desc: "keepalive from attrs disabled",
+			outboundCfg: attrs{
+				"myservice": attrs{
+					TransportName: attrs{
+						"address": "localhost:54816",
+						"grpc-keepalive": attrs{
+							"enabled": "false",
+							"time":    "10",
+							"timeout": "10",
+						},
+					},
+				},
+			},
+			wantOutbounds: map[string]wantOutbound{
+				"myservice": {
+					Address: "localhost:54816",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -376,6 +503,13 @@ func TestTransportSpec(t *testing.T) {
 					assert.Equal(t, wantOutbound.TLS, dialer.options.creds != nil)
 					if wantOutbound.WantCustomContextDialer {
 						assert.NotNil(t, dialer.options.contextDialer, "expected custom context dialer")
+					}
+
+					if wantOutbound.Keepalive != nil {
+						require.NotNil(t, dialer.options.keepaliveParams, "expected keepalive parameters")
+						assert.Equal(t, wantOutbound.Keepalive, dialer.options.keepaliveParams)
+					} else {
+						require.Nil(t, dialer.options.keepaliveParams, "unexpected keepalive paramters")
 					}
 				}
 			}
